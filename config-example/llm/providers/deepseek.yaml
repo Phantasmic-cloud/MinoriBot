@@ -1,0 +1,20 @@
+qps_limit: 5
+quota_sync_interval_sec: 60*60*6
+price_unit: "￥"
+
+api_key: ""
+base_url: "https://api.deepseek.com/v1"
+
+models:
+  - name: "deepseek-v4-flash"
+    input_pricing: 0.02/1e6
+    output_pricing: 2/1e6
+    is_multimodal: false
+  - name: "deepseek-v4-flash-version-exp"
+    input_pricing: 0.02/1e6
+    output_pricing: 2/1e6
+    is_multimodal: true
+  - name: "deepseek-v4-pro"
+    input_pricing: 0.025/1e6
+    output_pricing: 6/1e6
+    is_multimodal: false

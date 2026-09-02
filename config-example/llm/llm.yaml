@@ -1,0 +1,24 @@
+chat_max_tokens: null                    # 默认聊天最大生成长度
+chat_model_switch_interval: 1            # 默认的模型失败切换间隔 (s)
+chat_timeout: 180                        # 默认聊天超时时间 (s)
+
+text_embedding_models:                    # 可用文本嵌入模型列表
+  - name: "sf-bge-m3"
+    provider: "sf"
+    id: "BAAI/bge-m3"
+    input_pricing:  0.00000000        
+    embed_dim: 1024
+  - name: "sf-qwen3-embedding-8b"
+    provider: "sf"
+    id: "Qwen/Qwen3-Embedding-8B"
+    input_pricing: 0.00000004
+    embed_dim: 4096                       
+    
+    
+tts_models:                               # 文本转语音模型列表
+  - name: "openai-tts"
+    provider: "na"
+    id: "tts-1"
+    input_pricing:  0.000015               # 每个输入字符的价格
+    voice: "alloy"                         # TTS语音名称
+

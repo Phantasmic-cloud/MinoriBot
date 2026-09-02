@@ -1,0 +1,16 @@
+image_list_clean_interval: 3600   # 图片列表清理间隔(s)
+multi_image_max_num: 64           # 多图操作输入最大数量
+
+input_res_limit:  # 操作输入分辨率限制
+  default: 1024*1024*32
+  cutout:
+    floodfill: 1024*1024*32
+    ai: 1024*1024
+
+color_pick_topk: 10                # 取色器topk数量
+
+video_to_gif:
+  default_max_size: 256
+  default_max_fps: 10
+  default_max_frame_num: 200
+  size_limit: 20.0  # MB

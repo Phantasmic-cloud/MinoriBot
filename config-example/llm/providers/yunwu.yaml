@@ -1,0 +1,12 @@
+qps_limit: 5
+quota_sync_interval_sec: 60*60*6
+price_unit: "$"
+
+api_key: ""
+base_url: "https://api.openlux.ai/v1"
+
+models:
+  - name: "gemini-3.1-pro-preview"
+    is_multimodal: true
+  - name: "gemini-3.7-flash"
+    is_multimodal: true

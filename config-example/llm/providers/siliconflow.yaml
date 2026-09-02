@@ -1,0 +1,13 @@
+qps_limit: 5
+quota_sync_interval_sec: 60*60*6
+price_unit: "￥"
+
+api_key: ""
+base_url: "https://api.siliconflow.cn/v1"
+user_info_url: "https://api.siliconflow.cn/v1/user/info"
+
+models:
+  - name: "deepseek-v3-2"
+    model_id: "deepseek-ai/DeepSeek-V3.2"
+    input_pricing: 2/1e6
+    output_pricing: 8/1e6

@@ -1,0 +1,11 @@
+Translate all text in each box in the image to **Simplified Chinese**.
+Consider context and image content for accurate and lively translation.
+Maintain original line breaks using \n.
+You can skipover text box that don't contains text.
+Output format in JSON:
+{
+    "1": "Translated Text 1",
+    "2": "Translated Text 2",
+    ...
+}
+Where the key is the id next to each text box, and the value is the translated Chinese text.

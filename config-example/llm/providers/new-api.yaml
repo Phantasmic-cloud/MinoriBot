@@ -1,0 +1,10 @@
+qps_limit: 5
+quota_sync_interval_sec: 60*60*6
+price_unit: "$"
+
+api_key: ""
+base_url: ""
+
+models:
+  - name: "claude-sonnet-5"
+    is_multimodal: true

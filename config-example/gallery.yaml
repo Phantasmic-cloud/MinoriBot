@@ -1,0 +1,13 @@
+size_limit_mb: 1
+pick_limit: 5
+hash1_difference_threshold: 5
+hash2_difference_threshold: 1000
+user_recent_revert_expired_hours: 24
+
+sync:
+  enable: False
+  sync_times: 
+    - [3, 30, 00] # H, M, S
+  verbose: True
+  remote_dir: "MinoriBotGallery"
+  share_link: ""

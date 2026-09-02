@@ -1,0 +1,10 @@
+qps_limit: 5
+quota_sync_interval_sec: 60*60*6
+price_unit: "$"
+
+api_key: ""
+base_url: "https://api.longcat.chat/openai"
+
+models:
+  - name: "LongCat-2.0-Preview"
+    is_multimodal: false

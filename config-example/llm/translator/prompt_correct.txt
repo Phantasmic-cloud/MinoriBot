@@ -1,0 +1,7 @@
+{last}
+Here's my translation of the text in each box in the image to **Simplified Chinese**.
+Please proofread this result and correct the following issues:
+1. The translated text doesn't match the corresponding box in the image.
+2. The text isn't fully translated into Simplified Chinese.
+3. The translation is inaccurate, disconnected, or doesn't align with the image content.
+Provide the corrected result in the same JSON format.

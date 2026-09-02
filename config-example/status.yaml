@@ -1,0 +1,37 @@
+# 状态图配置。背景图放 data/status/bg/，随机抽一张，不走网络。
+# 布局按 650 宽画，scale=2 时输出 1300 宽。
+scale: 2
+
+need_at: true
+show_current_bot_only: false
+ob_v11_use_get_status: true
+disconnect_reset_counter: true
+
+ignore_parts: 
+  - '^/snap/'
+ignore_bad_parts: false
+sort_parts: true
+sort_parts_reverse: false
+
+ignore_disk_ios:
+  - '^(loop|zram)\d*$'
+ignore_no_io_disk: false
+sort_disk_ios: true
+
+ignore_nets:
+  - '^lo(op)?\d*$|^(Loopback|本地连接)'
+ignore_0b_net: false
+sort_nets: true
+
+test_sites:
+  - name: 百度
+    url: https://www.baidu.com/
+test_timeout: 1
+sort_sites: true
+
+proc_len: 10
+ignore_procs:
+  - '^System Idle Process$'
+  - '^(kthreadd|kworker/|ksoftirqd/|migration/|rcu_|cpuhp/|idle_inject/)'
+proc_sort_by: mem         # cpu / mem
+proc_cpu_max_100p: false

@@ -1,0 +1,17 @@
+duplicate:
+  hash1_threshold: 8
+  hash2_threshold: 300
+
+caption:
+  model:
+    - or:Gemini-3.1-Pro
+  timeout: 60
+  max_tokens: 4096
+  prompt: |
+    看这张表情包，输出2到3种使用场景。
+    严格输出JSON，无markdown：
+    {"captions": [{"emotion": "情绪词", "scene": "触发场景"}, ...]}
+    emotion填单个情绪词，如"无语""委屈""开心""尴尬""生气""傲娇""害羞""崩溃"。
+    scene填简短名词短语，不超过8字，例如：
+    "被戳中心思""说了蠢话""被人夸奖""被误解""遇到尴尬事""被人宠着""装作没事""事情搞砸了""被催得烦了""被人看穿""对方不听劝""假装努力"。
+    直接输出JSON，不要任何其他内容。

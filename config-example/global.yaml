@@ -1,0 +1,45 @@
+superuser:  # 超级用户 QQ 号列表
+  - 123456789
+
+startup_task_delay_seconds:  # 启动后延迟执行后台任务的随机区间（秒）
+  min: 0
+  max: 3
+
+group_member_name_cache_expire_seconds: 300  # 群成员名称缓存过期时间（秒）
+stranger_name_cache_expire_seconds: 300      # 陌生人名称缓存过期时间（秒）
+group_name_cache_expire_seconds: 3600        # 群名称缓存过期时间（秒）
+bot_group_cache_expire_seconds: 60           # bot 所在群缓存过期时间（秒）
+bot_friend_cache_expire_seconds: 60          # bot 好友缓存过期时间（秒）
+
+msg_send:
+  rate_limit:
+    second: 10  # 每秒限制发送消息的数量
+    day: 4000   # 每天限制发送消息的数量
+  default_fold_threshold: 20              # 默认折叠行数阈值
+  default_fold_fallback_method: "join_newline"  # 发送折叠消息失败时的回退方法
+  max_fold_msg_segment_count: 5           # 折叠消息分段数量限制
+  max_fold_msg_len: 6000                  # 折叠消息长度限制
+  tmp_img_keep_minutes: 5                 # 临时图片保存时间（分钟）
+  low_quality_image:
+    default_quality: 75
+    default_subsampling: 2
+    default_optimize: true
+
+default_cd: 2              # 默认指令冷却时间（秒）
+cd_verbose_interval: 30    # 间隔多少秒再提示一次“当前正在冷却”
+default_thread_pool_size: 4  # 默认线程池大小，较大值会增加内存占用
+
+plot:
+  debug: false
+  log_draw_time: false
+  canvas_size_limit: [4096, 4096]  # 画布宽高上限
+
+painter:
+  debug: false
+  process_num: 2  # 首次出图时才启动；0 表示主线程绘制
+  log_operation: false
+  font_cache_num: 16
+  roundrect_aa_target_radius: 32
+  emoji:
+    offset: [0, 30]
+    scale: 1.1

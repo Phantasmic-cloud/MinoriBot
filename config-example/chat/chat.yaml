@@ -1,0 +1,10 @@
+session_len_limit: 40             # 会话长度限制
+output_reasoning_content: false   # 是否输出推理内容
+
+chat_cd: 10
+tts_cd: 30
+img_trans_cd: 30
+
+image_caption:
+  limit: 2048       # 图片描述保存数量
+  timeout_sec: 10

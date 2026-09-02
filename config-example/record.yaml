@@ -1,0 +1,1 @@
+insert_msg_loop_interval_seconds: 2  # 向数据库插入消息记录循环间隔时间（秒）

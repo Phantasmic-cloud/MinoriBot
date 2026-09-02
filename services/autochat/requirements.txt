@@ -1,0 +1,7 @@
+websockets
+chromadb
+aiorpcx
+orjson
+setproctitle
+PyYAML
+numpy

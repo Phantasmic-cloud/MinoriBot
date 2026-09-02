@@ -1,0 +1,13 @@
+qps_limit: 5
+quota_sync_interval_sec: 60*60*6
+price_unit: "$"
+
+api_key: ""
+base_url: ""
+user_info_url: ""
+
+models:
+  - name: "Gemini-3.1-Pro"
+    input_pricing: 0.6/1e6
+    output_pricing: 4.8/1e6
+    is_multimodal: true

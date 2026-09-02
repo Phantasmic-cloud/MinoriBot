@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.log
+*.bak
+*.tmp
+data/
+config/
+.backup/
+开发.md

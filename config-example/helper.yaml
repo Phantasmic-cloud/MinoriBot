@@ -1,0 +1,10 @@
+template: |
+  【MinoriBot 使用帮助】
+  发送 /help 服务名 (比如"/help chat")查看各服务的详细帮助
+  在其他指令后加上 help （比如"/um help"）可以单独获取该指令的帮助
+  可查询的服务列表:
+  {service_list}
+
+img_width: 640
+img_scale: 1.0
+img_intersect: 24
