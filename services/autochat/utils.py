@@ -393,7 +393,7 @@ class Config:
         mtime = int(os.path.getmtime(self.path))
         if self.name not in Config._data or Config._data[self.name].mtime != mtime:
             try:
-                with open(self.path, 'r') as f:
+                with open(self.path, 'r', encoding="utf-8") as f:
                     data = yaml.safe_load(f)
                 Config._data[self.name] = ConfigData(mtime=mtime, data=data)
             except Exception as e:
