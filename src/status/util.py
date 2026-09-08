@@ -25,10 +25,7 @@ def auto_convert_byte(value: float, suffix: str = "", unit_index: int = 0, with_
     while abs(v) >= 1024 and i < len(_BYTE_UNITS) - 1:
         v /= 1024
         i += 1
-    if abs(v) >= 100 or i == unit_index:
-        num = f"{v:.0f}"
-    else:
-        num = f"{v:.1f}"
+    num = f"{v:.2f}"
     space = " " if with_space else ""
     return f"{num}{space}{_BYTE_UNITS[i]}{suffix}"
 
