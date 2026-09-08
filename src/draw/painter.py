@@ -513,15 +513,22 @@ def get_font(path: str, size: int) -> Font:
     if key not in font_cache:
         font = None
         used_path = None
-        for candidate, index in _font_candidates(name):
-            if not os.path.exists(candidate):
-                continue
+        if os.path.isfile(name):
             try:
-                font = ImageFont.truetype(candidate, size, index=index)
-                used_path = candidate if index == 0 else f"{candidate}#{index}"
-                break
+                font = ImageFont.truetype(name, size)
+                used_path = name
             except OSError:
-                continue
+                font = None
+        if font is None:
+            for candidate, index in _font_candidates(name):
+                if not os.path.exists(candidate):
+                    continue
+                try:
+                    font = ImageFont.truetype(candidate, size, index=index)
+                    used_path = candidate if index == 0 else f"{candidate}#{index}"
+                    break
+                except OSError:
+                    continue
         if font is None:
             fallbacks = [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if ("Bold" in name or "Heavy" in name) else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
