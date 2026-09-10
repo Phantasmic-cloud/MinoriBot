@@ -384,8 +384,12 @@ def get_image_b64(img) -> str:
     if not isinstance(img, Image.Image):
         raise TypeError(f"不支持的图片类型: {type(img)}")
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    # 转 RGB 并用 JPEG 压缩编码，减小发给多模态模型的图片体积；
+    # 否则默认存 PNG，照片体积会是 JPEG 的数倍，导致视觉模型上传+推理明显变慢
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    img.save(buf, format="JPEG", quality=85, optimize=True)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 def b64_to_image(s: str):
