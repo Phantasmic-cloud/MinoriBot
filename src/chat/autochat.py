@@ -16,6 +16,46 @@ autochat_gwl = get_group_white_list(file_db, logger, "autochat", is_service=Fals
 message_pool: dict[str, list[dict]] = {}
 
 
+def _normalize_for_autochat(segs: list[dict]) -> list[dict]:
+    """把喂给 autochat 微服务的消息段规整成它期望的形态：
+    - image 段的 sub_type 转成 int（原版 serve.py 用 `== 0` 判定，字符串 "0" 会判错）
+    - image 段缺 file_unique 时补一个稳定的唯一 id：优先取 url 里的 fileid 参数
+      （= QQ 图片真实 file_unique，格式如 Eh...CAQJneg，和 Luna 一致），
+      否则退化为 url 文件名"""
+    for seg in segs:
+        if seg.get("type") != "image":
+            continue
+        data = seg.setdefault("data", {})
+        raw_sub = data.get("sub_type", data.get("subType", 0))
+        try:
+            raw_sub = int(raw_sub or 0)
+        except (TypeError, ValueError):
+            raw_sub = 0
+        data["sub_type"] = raw_sub
+        if not data.get("file_unique"):
+            data["file_unique"] = _pick_image_id(data)
+    return segs
+
+
+def _pick_image_id(data: dict) -> str:
+    """从 image 段里挑一个稳定的唯一 id（优先 url 的 fileid，退化为 url 文件名）。"""
+    url = data.get("url")
+    if not url:
+        return ""
+    # QQ 图片真实 id 藏在 url 的 fileid 参数里，形如 Eh...CAQJneg
+    try:
+        key = "fileid="
+        i = url.find(key)
+        if i != -1:
+            fu = url[i + len(key):].split("&")[0].strip()
+            if fu:
+                return fu
+    except Exception:
+        pass
+    # 退化：取 url 最后一个路径段去掉 query 和扩展名
+    return url.rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0].split(".")[0]
+
+
 # ======================= 逻辑处理 ======================= #
 
 
@@ -34,7 +74,7 @@ async def record_new_message(bot: Bot, event: MessageEvent):
         "user_id": event.user_id,
         "group_id": event.group_id,
         "nickname": get_user_name_by_event(event),
-        "msg": get_msg(event),
+        "msg": _normalize_for_autochat(get_msg(event)),
     }
     for cid in message_pool:
         message_pool[cid].append(msg)
@@ -115,6 +155,7 @@ async def handle_get_group_msg(cid: str, group_id: int, limit: int):
             continue
         if isinstance(msg["time"], datetime):
             msg["time"] = int(msg["time"].timestamp())
+        msg["msg"] = _normalize_for_autochat(msg["msg"])
         ret.append(msg)
     return ret
 
