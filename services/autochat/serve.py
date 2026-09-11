@@ -41,22 +41,8 @@ async def rpc_poke_group_member(group_id: int, user_id: int):
     return await rpc_session.call('poke_group_member', group_id, user_id)
 
 
-MAX_REPLIES = 3
-
-
-def _parse_replies(llm_response: dict) -> list[str]:
-    raw = llm_response.get('replies')
-    texts: list[str] = []
-    if isinstance(raw, list):
-        texts = [str(x).strip() for x in raw if str(x).strip()]
-    elif isinstance(raw, str) and raw.strip():
-        texts = [raw.strip()]
-    else:
-        for key in ('reply', 'reply2'):
-            t = llm_response.get(key)
-            if isinstance(t, str) and t.strip():
-                texts.append(t.strip())
-    return texts[:MAX_REPLIES]
+MAX_ACTIONS = 5
+MAX_TEXT_ACTIONS = 3
 
 
 def _parse_poke_ids(raw) -> list[int]:
@@ -80,6 +66,51 @@ def _parse_poke_ids(raw) -> list[int]:
         seen.add(uid)
         ids.append(uid)
     return ids
+
+
+def _sticker_query_ok(query) -> bool:
+    return isinstance(query, dict) and bool(query.get('emotion') or query.get('scene'))
+
+
+def _expand_action_item(item) -> list[dict]:
+    if isinstance(item, str):
+        text = item.strip()
+        return [{'kind': 'text', 'text': text}] if text else []
+    if not isinstance(item, dict):
+        return []
+    actions = []
+    for key, val in item.items():
+        if key == 'text':
+            text = str(val).strip() if val is not None else ''
+            if text:
+                actions.append({'kind': 'text', 'text': text})
+        elif key == 'poke':
+            ids = _parse_poke_ids(val)
+            if ids:
+                actions.append({'kind': 'poke', 'ids': ids})
+        elif key == 'sticker' and _sticker_query_ok(val):
+            actions.append({'kind': 'sticker', 'query': val})
+    return actions
+
+
+def _parse_actions(llm_response: dict) -> list[dict]:
+    actions: list[dict] = []
+    raw = llm_response.get('actions')
+    if isinstance(raw, list):
+        for item in raw:
+            actions.extend(_expand_action_item(item))
+
+    out: list[dict] = []
+    text_n = 0
+    for action in actions:
+        if len(out) >= MAX_ACTIONS:
+            break
+        if action['kind'] == 'text':
+            if text_n >= MAX_TEXT_ACTIONS:
+                continue
+            text_n += 1
+        out.append(action)
+    return out
 
 async def rpc_query_llm(model: str, prompt: str, images: list[dict] = [], options: dict = {}):
     return await rpc_session.call('query_llm', model, prompt, images, options, timeout=options.get('timeout', 300) + 5)
@@ -691,48 +722,50 @@ async def chat(msg: Message):
                 'max_tokens': config.get('chat.llm.max_tokens'),
                 'json_reply': True,
                 'json_key_restraints': [
+                    { 'key': 'actions', 'type': 'list' },
                     { 'key': 'user_updates', 'type': 'list' },
                 ],
             }
         )
         info(f"LLM生成回复成功: {llm_response}")
 
-        reply_texts = _parse_replies(llm_response)
-        sticker_query = llm_response.get('sticker', '')
-        poke_ids = _parse_poke_ids(llm_response.get('poke'))
+        actions = _parse_actions(llm_response)
         user_updates = llm_response.get('user_updates', [])
 
     except:
         error(f"请求LLM生成回复时失败，放弃聊天处理")
         return
 
-    # ---------------- 搜索表情包 ---------------- #
-
-    sticker_path, sticker_sid, sticker_all_sids, sticker_old_multipliers = None, None, None, None
-    if sticker_query and isinstance(sticker_query, dict) and (sticker_query.get('emotion') or sticker_query.get('scene')):
-        try:
-            sticker_path, sticker_sid, sticker_all_sids, sticker_old_multipliers = await search_sticker(msg.group_id, sticker_query)
-        except BaseException as e:
-            warning(f"Sticker搜索失败: {get_exc_desc(e)}")
-
-    # ---------------- 发送回复 ---------------- #
+    # ---------------- 发送动作 ---------------- #
 
     try:
         send_msg_id_texts: list[tuple[int, str]] = []
+        first_action = True
+
+        async def wait_interval():
+            nonlocal first_action
+            if first_action:
+                first_action = False
+                return
+            await asyncio.sleep(config.get('chat.reply_interval_seconds'))
+
+        async def note_sent_msg(send_msg_id: int):
+            status.load(msg.group_id)
+            status.self_msg_ids.append(send_msg_id)
+            status.self_msg_ids = status.self_msg_ids[-100:]
+            status.last_reply_time = time.time()
+            status.save()
 
         async def process_reply_text(index: int, text: str):
             if not text:
                 info(f"LLM生成的回复{index}为空，放弃发送")
                 return
-            # 获取at和回复
             at_id, reply_id = None, None
-            # 匹配 [@id]
             if at_match := re.search(r"\[@(\d+)\]", text):
                 at_id = int(at_match.group(1))
                 text = text.replace(at_match.group(0), "")
                 if any(m.user_id == at_id for m in recent_msgs):
                     text = f"[CQ:at,qq={at_id}]" + text
-            # 匹配 [reply=id]
             if reply_match := re.search(r"\[reply=(\d+)\]", text):
                 reply_id = int(reply_match.group(1))
                 text = text.replace(reply_match.group(0), "")
@@ -740,33 +773,21 @@ async def chat(msg: Message):
                     text = f"[CQ:reply,id={reply_id}]" + text
             text = truncate(text, config.get('chat.reply_max_length'))
             info(f"自动聊天生成回复{index}: {text} at_id={at_id} reply_id={reply_id}")
-        
+
             send_ret = await rpc_send_group_msg(msg.group_id, text)
             send_msg_id = int(send_ret['message_id'])
             send_msg_id_texts.append((send_msg_id, text))
             info(f"发送回复{index}成功: send_msg_id={send_msg_id}")
+            await note_sent_msg(send_msg_id)
 
-            status.load(msg.group_id)
-            status.self_msg_ids.append(send_msg_id)
-            status.self_msg_ids = status.self_msg_ids[-100:]
-            status.last_reply_time = time.time()
-            status.save()
-
-        for index, text in enumerate(reply_texts, start=1):
-            if index > 1:
-                await asyncio.sleep(config.get('chat.reply_interval_seconds'))
-            await process_reply_text(index, text)
-
-        # 发送表情包
-        if sticker_path:
-            await asyncio.sleep(config.get('chat.reply_interval_seconds'))
+        async def process_sticker(hit: tuple):
+            sticker_path, sticker_sid, sticker_all_sids, sticker_old_multipliers = hit
+            if not sticker_path:
+                info("未匹配到表情包，跳过发送")
+                return
             send_ret = await rpc_send_group_msg(msg.group_id, f"[CQ:image,file=file://{sticker_path}]")
             send_msg_id = int(send_ret['message_id'])
-            status.load(msg.group_id)
-            status.self_msg_ids.append(send_msg_id)
-            status.self_msg_ids = status.self_msg_ids[-100:]
-            status.last_reply_time = time.time()
-            status.save()
+            await note_sent_msg(send_msg_id)
             info(f"表情包发送成功: sid={sticker_sid}")
             sticker_captions = [text.replace(',', '/') for sid, text, path, full_emb, emotion_emb in _sticker_cache if sid == sticker_sid]
             sticker_desc = ' | '.join(sticker_captions) if sticker_captions else f"sid={sticker_sid}"
@@ -777,14 +798,56 @@ async def chat(msg: Message):
             if changed:
                 info(f"表情包倍率: {', '.join(changed)}")
 
-        if poke_ids:
-            await asyncio.sleep(config.get('chat.reply_interval_seconds'))
-            for uid in poke_ids:
+        async def process_poke(ids: list[int]):
+            for uid in ids:
                 try:
                     await rpc_poke_group_member(msg.group_id, uid)
                     info(f"戳一戳成功: user_id={uid}")
                 except Exception as e:
                     warning(f"戳一戳失败 user_id={uid}: {get_exc_desc(e)}")
+
+        sticker_hits: dict[int, tuple] = {}
+        sticker_indexes = [i for i, a in enumerate(actions) if a['kind'] == 'sticker']
+        if sticker_indexes:
+            async def prefetch_stickers():
+                for i in sticker_indexes:
+                    sticker_hits[i] = await search_sticker(msg.group_id, actions[i]['query'])
+
+            try:
+                await asyncio.wait_for(
+                    prefetch_stickers(),
+                    timeout=float(config.get('chat.sticker.timeout')),
+                )
+            except asyncio.TimeoutError:
+                warning("Sticker搜索超时，抛弃未就绪的表情包")
+            except BaseException as e:
+                warning(f"Sticker搜索失败: {get_exc_desc(e)}")
+
+        exec_actions = []
+        for i, action in enumerate(actions):
+            if action['kind'] != 'sticker':
+                exec_actions.append(action)
+                continue
+            hit = sticker_hits.get(i)
+            if not hit or not hit[0]:
+                if i not in sticker_hits:
+                    info("表情包未就绪，跳过发送")
+                else:
+                    info("未匹配到表情包，跳过发送")
+                continue
+            exec_actions.append({**action, 'hit': hit})
+
+        text_index = 0
+        for action in exec_actions:
+            kind = action['kind']
+            await wait_interval()
+            if kind == 'text':
+                text_index += 1
+                await process_reply_text(text_index, action['text'])
+            elif kind == 'sticker':
+                await process_sticker(action['hit'])
+            elif kind == 'poke':
+                await process_poke(action['ids'])
 
     except:
         error(f"发送回复时失败")
