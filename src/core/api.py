@@ -1,6 +1,9 @@
 from typing import Any
 
+from .logger import get_logger
 from .message import MessageLike, dump_message
+
+logger = get_logger("core")
 
 
 class APIMixin:
@@ -88,6 +91,82 @@ class APIMixin:
             "send_private_forward_msg",
             user_id=int(user_id),
             messages=messages,
+            **extra,
+        )
+
+    # -------- OneBot客户端类型 -------- #
+
+    _CLIENT_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("napcat", ("napcat",)),
+        ("llonebot", ("llonebot", "llone")),
+        ("lagrange", ("lagrange",)),
+        ("snowluma", ("snowluma", "luma")),
+    )
+
+    async def detect_client_type(self) -> str:
+        """懒探测 OneBot 实现，结果缓存在当前 Bot 实例上。连上时不要主动调。"""
+        cached = getattr(self, "_client_type", None)
+        if cached:
+            return cached
+        kind = "unknown"
+        try:
+            ver = await self.call_api("get_version_info")
+            blob = ""
+            if isinstance(ver, dict):
+                blob = " ".join(
+                    str(ver.get(k) or "") for k in ("app_name", "app_fullname", "impl", "version")
+                ).lower()
+            for name, keys in self._CLIENT_ALIASES:
+                if any(k in blob for k in keys):
+                    kind = name
+                    break
+            logger.info("OneBot 客户端探测完成: %s (%s)", kind, blob or "-")
+        except Exception:
+            logger.warning("OneBot 客户端探测失败，后续扩展接口走保底 action")
+            kind = "unknown"
+        self._client_type = kind
+        return kind
+
+    # -------- 戳一戳 / 接口 -------- #
+
+    _POKE_ACTIONS = {
+        "napcat": "group_poke",
+        "llonebot": "group_poke",
+        "lagrange": "group_poke",
+        "snowluma": "send_poke",
+        "unknown": "group_poke",
+    }
+
+    async def poke_group_member(self, group_id: int, user_id: int, **extra: Any) -> Any:
+        """群内戳一戳。按客户端选 action，保底 group_poke。"""
+        kind = await self.detect_client_type()
+        action = self._POKE_ACTIONS.get(kind, "group_poke")
+        return await self.call_api(
+            action,
+            group_id=int(group_id),
+            user_id=int(user_id),
+            **extra,
+        )
+
+    # -------- 回应消息 / 接口 -------- #
+
+    async def set_msg_emoji_like(self, message_id: int, emoji_id: int | str, **extra: Any) -> Any:
+        """给消息贴表情回应。NapCat/LLOneBot: set_msg_emoji_like；Lagrange: set_group_reaction。"""
+        kind = await self.detect_client_type()
+        mid = int(message_id)
+        eid = str(emoji_id)
+        if kind == "lagrange":
+            return await self.call_api(
+                "set_group_reaction",
+                message_id=mid,
+                code=eid,
+                is_add=True,
+                **extra,
+            )
+        return await self.call_api(
+            "set_msg_emoji_like",
+            message_id=mid,
+            emoji_id=eid,
             **extra,
         )
 

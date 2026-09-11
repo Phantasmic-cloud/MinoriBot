@@ -37,6 +37,50 @@ async def rpc_get_self_info(group_id: int):
 async def rpc_send_group_msg(group_id: int, message: str):
     return await rpc_session.call('send_group_msg', group_id, message)
 
+async def rpc_poke_group_member(group_id: int, user_id: int):
+    return await rpc_session.call('poke_group_member', group_id, user_id)
+
+
+MAX_REPLIES = 3
+
+
+def _parse_replies(llm_response: dict) -> list[str]:
+    raw = llm_response.get('replies')
+    texts: list[str] = []
+    if isinstance(raw, list):
+        texts = [str(x).strip() for x in raw if str(x).strip()]
+    elif isinstance(raw, str) and raw.strip():
+        texts = [raw.strip()]
+    else:
+        for key in ('reply', 'reply2'):
+            t = llm_response.get(key)
+            if isinstance(t, str) and t.strip():
+                texts.append(t.strip())
+    return texts[:MAX_REPLIES]
+
+
+def _parse_poke_ids(raw) -> list[int]:
+    if raw is None or raw == '':
+        return []
+    if isinstance(raw, (int, float, str)):
+        items = [raw]
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        return []
+    ids: list[int] = []
+    seen: set[int] = set()
+    for item in items:
+        try:
+            uid = int(item)
+        except (TypeError, ValueError):
+            continue
+        if uid <= 0 or uid in seen:
+            continue
+        seen.add(uid)
+        ids.append(uid)
+    return ids
+
 async def rpc_query_llm(model: str, prompt: str, images: list[dict] = [], options: dict = {}):
     return await rpc_session.call('query_llm', model, prompt, images, options, timeout=options.get('timeout', 300) + 5)
 
@@ -647,16 +691,15 @@ async def chat(msg: Message):
                 'max_tokens': config.get('chat.llm.max_tokens'),
                 'json_reply': True,
                 'json_key_restraints': [
-                    { 'key': 'reply', 'type': 'str' },
                     { 'key': 'user_updates', 'type': 'list' },
                 ],
             }
         )
         info(f"LLM生成回复成功: {llm_response}")
 
-        reply_text = llm_response['reply']
-        reply_text2 = llm_response.get('reply2', '')
+        reply_texts = _parse_replies(llm_response)
         sticker_query = llm_response.get('sticker', '')
+        poke_ids = _parse_poke_ids(llm_response.get('poke'))
         user_updates = llm_response.get('user_updates', [])
 
     except:
@@ -709,9 +752,10 @@ async def chat(msg: Message):
             status.last_reply_time = time.time()
             status.save()
 
-        await process_reply_text(1, reply_text)
-        await asyncio.sleep(config.get('chat.reply_interval_seconds'))
-        await process_reply_text(2, reply_text2)
+        for index, text in enumerate(reply_texts, start=1):
+            if index > 1:
+                await asyncio.sleep(config.get('chat.reply_interval_seconds'))
+            await process_reply_text(index, text)
 
         # 发送表情包
         if sticker_path:
@@ -732,6 +776,15 @@ async def chat(msg: Message):
                        for s in sticker_all_sids if abs(get_sticker_multiplier(msg.group_id, s) - sticker_old_multipliers[s]) > 0.001]
             if changed:
                 info(f"表情包倍率: {', '.join(changed)}")
+
+        if poke_ids:
+            await asyncio.sleep(config.get('chat.reply_interval_seconds'))
+            for uid in poke_ids:
+                try:
+                    await rpc_poke_group_member(msg.group_id, uid)
+                    info(f"戳一戳成功: user_id={uid}")
+                except Exception as e:
+                    warning(f"戳一戳失败 user_id={uid}: {get_exc_desc(e)}")
 
     except:
         error(f"发送回复时失败")

@@ -146,6 +146,16 @@ async def handle_send_group_msg(cid: str, group_id: int, message: list[dict] | s
     return await bot.send_group_msg(group_id=int(group_id), message=message)
 
 
+@rpc_method(RPC_SERVICE, "poke_group_member")
+async def handle_poke_group_member(cid: str, group_id: int, user_id: int):
+    if not chat_gwl.check_id(group_id) or not autochat_gwl.check_id(group_id):
+        logger.warning("自动聊天取消戳一戳到未启用群组 %s", group_id)
+        return
+    bot = get_bot()
+    logger.info("自动聊天RPC客户端 %s 戳群 %s 用户 %s", cid, group_id, user_id)
+    return await bot.poke_group_member(int(group_id), int(user_id))
+
+
 @rpc_method(RPC_SERVICE, "get_group_history_msg")
 async def handle_get_group_msg(cid: str, group_id: int, limit: int):
     msgs = await query_recent_msg(group_id, limit)
