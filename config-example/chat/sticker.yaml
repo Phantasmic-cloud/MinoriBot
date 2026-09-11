@@ -4,7 +4,7 @@ duplicate:
 
 caption:
   model:
-    - or:Gemini-3.1-Pro
+    - gg:gemini-3.8-flash
   timeout: 60
   max_tokens: 4096
   prompt: |

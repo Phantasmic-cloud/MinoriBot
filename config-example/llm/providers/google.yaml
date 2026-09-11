@@ -7,4 +7,58 @@ http_options:
 
 api_key: ""
 
-models: []
+models:  
+  # ============= 3 models ============= #
+
+  - name: "gemini-3.1-pro"
+    model_id: "models/gemini-3.1-pro"
+    is_multimodal: true
+    client_kwargs:
+      thinking_config:
+        include_thoughts: true
+        thinking_level: low
+
+  - name: "gemini-3.1-pro-high"
+    model_id: "models/gemini-3.1-pro"
+    is_multimodal: true
+    client_kwargs:
+      thinking_config:
+        include_thoughts: true
+        thinking_level: high
+
+  - name: "gemini-3.8-flash"
+    model_id: "models/gemini-3.8-flash"
+    is_multimodal: true
+    client_kwargs:
+      thinking_config:
+        include_thoughts: false
+
+  - name: "gemini-3.8-flash-thinking"
+    model_id: "models/gemini-3.8-flash"
+    is_multimodal: true
+    client_kwargs:
+      thinking_config:
+        include_thoughts: true
+        thinking_level: low
+
+  - name: "gemini-3.7-flash-thinking-medium"
+    model_id: "models/gemini-3.7-flash"
+    is_multimodal: true
+    client_kwargs:
+      thinking_config:
+        include_thoughts: true
+        thinking_budget: medium
+
+  - name: "gemini-3.7-flash-thinking-high"
+    model_id: "models/gemini-3.7-flash"
+    is_multimodal: true
+    client_kwargs:
+      thinking_config:
+        include_thoughts: true
+        thinking_level: high
+
+  # ============= flash lite models ============= #
+
+  - name: "gemini-3.5-flash-lite"
+    model_id: "models/gemini-3.5-flash-lite"
+    is_multimodal: true

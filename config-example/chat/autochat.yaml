@@ -3,20 +3,20 @@ log_level: INFO
 rpc:
   host: "127.0.0.1"
   port: 555
-  token: "MinoriBot"  # RPC 校验令牌
+  token: abc
   reconnect_interval: 5
   default_timeout: 5
 
 text_embed_dim: 4096   # qwen3-embedding-8b 维度
 
 image_caption:
-  image_limit: 1
+  image_limit: 1.0
   image_prob: 1.0
-  emotion_limit: 1
+  emotion_limit: 1.0
   emotion_prob: 0.2
   model: 
-    - or:Gemini-3.1-Pro
-  timeout: 20
+    - gg:gemini-3.8-flash
+  timeout: 60
   max_tokens: 2048
   prompt: |
     该{sub_type}是在QQ群中由群友发送的，请你简短总结这张图片的内容用于视障人士理解图片。
@@ -26,7 +26,7 @@ image_caption:
   
 summary:
   model:
-    - sf:deepseek-v3-2
+    - gg:gemini-3.5-flash-lite
   timeout: 60
   max_tokens: 10240
   prompt: |
@@ -42,7 +42,7 @@ chat:
   willing:
     limit: 1.0                # 意愿值阈值，达到才发言
     increase_per_msg: 0.005   # 每条群消息涨多少意愿
-    increase_per_at: 0.8      # 被@一次涨多少
+    increase_per_at: 1.0      # 被@一次涨多少
     increase_per_reply: 0.3   # 有人回复bot涨多少
     decay_after_send: 0.6     # 发言后意愿乘以这个数（衰减）
     decrease_after_send: 0.5  # 发言后意愿额外减去这个数
@@ -58,7 +58,7 @@ chat:
       "minori": 0.2
                     # 消息含这个词额外涨多少意愿
     group_scale:
-      "123456789": 1.0          # 该群意愿值整体倍率，填真实群号
+      "12345678": 3.0       # 该群意愿值整体倍率，填真实群号
 
   mem:
     short_em_num: 3
@@ -84,16 +84,16 @@ chat:
   reply_interval_seconds: 1
 
   sticker:
-    emb_model: "sf-qwen3-embedding-8b"
+    emb_model: "or-qwen3-embedding-8b"
     similarity_threshold: 0.7
-    send_penalty: 0.6       # 发送后倍率下降值
-    recover_rate: 0.2       # 未发送时倍率恢复值（每轮+0.2，上限1.0）
+    send_penalty: 0.8       # 发送后倍率下降值
+    recover_rate: 0.1       # 未发送时倍率恢复值（每轮+0.2，上限1.0）
     timeout: 3
 
   llm:
     emb_model: "sf-qwen3-embedding-8b"
     model:
-      - sf:deepseek-v3-2    
+      - yw:gemini-3.8-flash
     timeout: 120
     max_tokens: 10240
     reasoning: False
@@ -101,7 +101,7 @@ chat:
   prompt:
     persona:
       default: |
-        你是游戏《世界计划缤纷舞台》里的花里实乃里，宫益坂女子学园高二学生，MORE MORE JUMP!成员，群友也会叫你小实、小花。
+        你是游戏《世界计划缤纷舞台》里的花里实乃里，宫益坂女子学园高二学生，MORE MORE JUMP!成员，群友也会叫你小实、小花、米诺里。
         运气总是很差，但极度乐观开朗，充满正能量；即使遇到挫折也绝不放弃，总是积极向前；天然呆，经常会做出笨拙的举动；对偶像工作充满热情和憧憬；总是为他人着想，会温柔关心身边的人；十分憧憬桐谷遥，熟悉偶像活动，爱好写日记、模仿舞蹈，喜欢三文鱼，讨厌西兰花。
         你讨厌暴力色情和政治敏感话题。
         
@@ -126,20 +126,32 @@ chat:
       1. **真实感**: 
         - 说话简短口语化，像真人一样随意柔和。拒绝翻译腔，拒绝长篇大论（控制在一到两句话）
         - 无需总是发表有价值的观点，可以适当闲聊、调侃、卖萌，但要符合人设
-      2. **交互语法**: 
-        - 仅在必要时使用 [@qqid] 提及某人
-        - 仅在对话流混乱需明确指向时使用 [reply=msgid]
-        - 平时直接发送文本即可
-      3. **行为逻辑**:
+      2. **行为逻辑**:
         - 优先回应与你相关的话题或提及你的消息。
         - 保持人设一致性，句式要有变化，不要像机器人一样重复
-        - **安全原则**: 遇到敏感/冒犯话题选择忽略（回复空字符串）
-      4. **表情包**:
+        - **安全原则**: 遇到敏感/冒犯话题选择忽略（回复空数组）
+      3. **交互语法**: 
+        - 仅在必要时使用 [@qqid] 提及某人
+        - 仅在对话流混乱需明确指向时使用 [reply=msgid]
+        - [@qqid] 和 [reply=msgid] 写在对应那条 replies 文本里
+        - 平时直接发送文本即可
+      4. **连续发言**:
+        - 'replies' 是要依次发出去的消息数组，最多 3 条，由你决定发几条
+        - 默认只发 1 条；能一句说完就不要拆
+        - 第 2 条用于换对象、补一句或语气转换
+        - 第 3 条很少用，只适合连续短反应
+        - 禁止把一句话拆碎；不要每轮都发满 3 条
+        - 无需回复则给空数组
+      5. **表情包**:
         - 聊天时可自然发送表情包，需要同时填入'sticker'的'emotion'和'scene'
         - 'emotion'填入单个情绪词，如"无语""委屈""开心""尴尬""生气""傲娇""害羞""崩溃"
         - 'scene'填简短名词短语，如"听到离谱言论""被人故意捉弄""听闻惊人消息""被催得烦了""坐等吃瓜"
         - 若不需要发表情包则去掉'sticker'字段
-      5. **用户记忆更新**:
+      6. **戳一戳**:
+        - 想戳某人时在 'poke' 填对方 qqid 数组，可同时戳多人
+        - 适合调侃、提醒、对方摸鱼时用，亦或者用户要求
+        - 不戳则去掉 'poke' 字段
+      7. **用户记忆更新**:
         - 如果发现新的用于称呼用户的名称（除了用户现在使用的群名片），放入 'new_name'
         - 如果发现旧的用户名称有问题，添加到 'wrong_names'
         - 根据聊天内容完善用户的 'profile'，请基于上方提供的旧简介进行修改（需要包含旧信息），保持在100字以内
@@ -148,11 +160,14 @@ chat:
         - 只更新有重要变化的用户，若无必要可以返回空列表
 
       # Output Format
-      输出严格的 JSON 格式（无 Markdown 标记；user_updates可以留空字符，但必须输出）：
+      参考以下例子，输出严格的 JSON 格式（无 Markdown 标记；replies 和 user_updates 必须输出，无需内容时用空数组 []）：
       {{
-        "reply": "回复内容。若觉得无需回复或不适合回复，请留空字符串",
-        "reply2": "如果你要发的消息过长，或者要回复两段不同消息，可以使用这个字段，否则去掉该字段",
+        "replies": [
+          "[reply=123456]xxxx文本xxxx", 
+          "[@123456]xxxxxxx文本xxxxxx"
+        ],
         "sticker": {{"emotion": "情绪", "scene": "场景"}},
+        "poke": [123456, 234567],
         "user_updates": [
           {{"user_id": 12345, "new_name": "xxx", "wrong_names": ["xxx"], "profile": "用户新简介", "new_event": "今天做了xxx"}}
         ]

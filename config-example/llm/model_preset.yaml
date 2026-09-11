@@ -1,36 +1,23 @@
-basic_chat_mm: na:Gemini-3.1-Pro
+basic_chat_mm: gg:gemini-3.1-pro-high
 
 translation: 
-  - na:Gemini-3.1-Pro
+  - gg:gemini-3.1-pro-high
   
-translator: ds:deepseek-v4-flash
+translator: gg:gemini-3.8-flash
 
 chat:
   image_caption: 
-    - na:Gemini-3.1-Pro
+    - gg:gemini-3.1-pro-high
 
   private:
-    text: na:Gemini-3.1-Pro
-    mm: na:Gemini-3.1-Pro
-    tool: na:Gemini-3.1-Pro
+    text: gg:gemini-3.1-pro-high
+    mm: gg:gemini-3.1-pro-high
+    tool: gg:gemini-3.1-pro-high
     image: na:gpt-image-2
   
   group:
-    text: na:Gemini-3.1-Pro
-    mm: na:Gemini-3.1-Pro
-    tool: na:Gemini-3.1-Pro
+    text: gg:gemini-3.1-pro-high
+    mm: gg:gemini-3.1-pro-high
+    tool: gg:gemini-3.1-pro-high
     image: na:gpt-image-2
-
-cron: 
-  na:Gemini-3.1-Pro
-
-sekai:
-  stamp_cutout:
-    - na:gpt-image-2
-
-  story_summary:
-    event: 
-      - na:Gemini-3.1-Pro
-    card: 
-      - na:Gemini-3.1-Pro
 
