@@ -766,10 +766,10 @@ async def chat(msg: Message):
                 text = text.replace(at_match.group(0), "")
                 if any(m.user_id == at_id for m in recent_msgs):
                     text = f"[CQ:at,qq={at_id}]" + text
-            if reply_match := re.search(r"\[reply=(\d+)\]", text):
+            if reply_match := re.search(r"\[reply=(-?\d+)\]", text):
                 reply_id = int(reply_match.group(1))
                 text = text.replace(reply_match.group(0), "")
-                if any(m.msg_id == reply_id for m in recent_msgs):
+                if any(int(m.msg_id) == reply_id for m in recent_msgs):
                     text = f"[CQ:reply,id={reply_id}]" + text
             text = truncate(text, config.get('chat.reply_max_length'))
             info(f"自动聊天生成回复{index}: {text} at_id={at_id} reply_id={reply_id}")
