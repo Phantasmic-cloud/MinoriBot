@@ -1,5 +1,7 @@
 from datetime import datetime
+import time
 
+from src.core import NoticeEvent, on_notice
 from src.llm import ChatSession, ChatSessionResponse, get_text_embedding
 from src.record import before_record_hook
 from src.record.sql import query_recent_msg
@@ -80,6 +82,74 @@ async def record_new_message(bot: Bot, event: MessageEvent):
         message_pool[cid].append(msg)
 
 
+def _enqueue_autochat_item(item: dict):
+    for cid in message_pool:
+        message_pool[cid].append(item)
+
+
+_recent_poke_keys: list[tuple[int, int, int, int]] = []
+
+
+def _poke_is_dup(group_id: int, from_id: int, target_id: int, ts: float) -> bool:
+    global _recent_poke_keys
+    ts_i = int(ts)
+    gid, fid, tid = int(group_id), int(from_id), int(target_id)
+    _recent_poke_keys = [k for k in _recent_poke_keys if ts_i - k[0] <= 3]
+    for t, g, f, tgt in _recent_poke_keys:
+        if g == gid and f == fid and tgt == tid and abs(t - ts_i) <= 2:
+            return True
+    _recent_poke_keys.append((ts_i, gid, fid, tid))
+    return False
+
+
+async def _push_poke_event(
+    bot: Bot,
+    group_id: int,
+    from_id: int,
+    target_id: int,
+    ts: float,
+    from_name: str | None = None,
+    target_name: str | None = None,
+):
+    if not chat_gwl.check_id(group_id) or not autochat_gwl.check_id(group_id):
+        return
+    if _poke_is_dup(group_id, from_id, target_id, ts):
+        return
+    if not from_name:
+        from_name = await get_group_member_name(group_id, from_id, bot=bot)
+    if not target_name:
+        target_name = await get_group_member_name(group_id, target_id, bot=bot)
+    _enqueue_autochat_item({
+        "msg_id": 0,
+        "time": int(ts),
+        "user_id": int(from_id),
+        "group_id": int(group_id),
+        "nickname": from_name or str(from_id),
+        "msg": [{
+            "type": "poke",
+            "data": {
+                "target_id": int(target_id),
+                "target_name": target_name or str(target_id),
+            },
+        }],
+    })
+
+
+@on_notice()
+async def record_group_poke(bot: Bot, event: NoticeEvent):
+    if event.notice_type != "notify" or event.sub_type != "poke":
+        return
+    if not event.group_id:
+        return
+    await _push_poke_event(
+        bot,
+        int(event.group_id),
+        int(event.user_id),
+        int(event.target_id),
+        float(event.time or time.time()),
+    )
+
+
 RPC_SERVICE = "autochat"
 
 
@@ -153,7 +223,15 @@ async def handle_poke_group_member(cid: str, group_id: int, user_id: int):
         return
     bot = get_bot()
     logger.info("自动聊天RPC客户端 %s 戳群 %s 用户 %s", cid, group_id, user_id)
-    return await bot.poke_group_member(int(group_id), int(user_id))
+    ret = await bot.poke_group_member(int(group_id), int(user_id))
+    await _push_poke_event(
+        bot,
+        int(group_id),
+        int(bot.self_id),
+        int(user_id),
+        time.time(),
+    )
+    return ret
 
 
 @rpc_method(RPC_SERVICE, "get_group_history_msg")

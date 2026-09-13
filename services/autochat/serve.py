@@ -417,12 +417,56 @@ def json_msg_to_readable_text(data: dict):
         except:
             return "[转发消息]"
 
+def _is_poke_msg(msg: Message) -> bool:
+    return any(seg.get('type') == 'poke' for seg in msg.msg)
+
+
+def _poke_target_id(msg: Message) -> int:
+    for seg in msg.msg:
+        if seg.get('type') == 'poke':
+            try:
+                return int(seg.get('data', {}).get('target_id') or 0)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
+def _poke_key(msg: Message) -> tuple[int, int, int]:
+    ts = int(msg.time.timestamp()) if isinstance(msg.time, datetime) else int(msg.time)
+    return (ts, int(msg.user_id), _poke_target_id(msg))
+
+
+group_pokes: dict[int, list[Message]] = {}
+POKE_KEEP = 50
+
+
+def remember_poke(msg: Message):
+    lst = group_pokes.setdefault(msg.group_id, [])
+    key = _poke_key(msg)
+    if any(_poke_key(p) == key for p in lst):
+        return
+    lst.append(msg)
+    del lst[:-POKE_KEEP]
+
+
+def collect_recent_pokes(group_id: int, since: datetime) -> list[Message]:
+    return [p for p in group_pokes.get(group_id, []) if p.time >= since]
+
+
+def _poke_person_label(uid: int, name: str, self_id: int) -> str:
+    if int(uid) == int(self_id):
+        return "你"
+    label = name or str(uid)
+    return f"{label}({uid})"
+
+
 async def format_msgs(
     msgs: list[Message], 
     image_caption_limit: int, 
     image_caption_prob: float,
     emotion_caption_limit: int,
     emotion_caption_prob: float,
+    self_id: int = 0,
 ) -> str:
     msgs = sorted(msgs, key=lambda m: m.time, reverse=True)
     texts = []
@@ -433,6 +477,12 @@ async def format_msgs(
         for seg in msg.msg:
             stype, sdata = seg['type'], seg['data']
             match stype:
+                case "poke":
+                    from_label = _poke_person_label(msg.user_id, msg.nickname, self_id)
+                    tid = int(sdata.get('target_id') or 0)
+                    tname = sdata.get('target_name') or str(tid)
+                    to_label = _poke_person_label(tid, tname, self_id)
+                    text = f"{get_readable_datetime(msg.time)} {from_label} 戳了戳 {to_label}"
                 case "text":
                     text += sdata['text']
                 case "face":
@@ -505,9 +555,16 @@ async def chat(msg: Message):
     self_id = int(_self_infos[msg.group_id]['self_id'])
     self_name = _self_infos[msg.group_id]['nickname']
 
-    if msg.user_id == self_id:  # 自己发的消息不触发
+    is_poke = _is_poke_msg(msg)
+    poke_target = _poke_target_id(msg) if is_poke else 0
+    if is_poke:
+        remember_poke(msg)
+
+    if msg.user_id == self_id:  # 自己发的消息/自己戳人不触发
         return
-    if get_plain_text(msg).startswith("/"):  # 命令消息不触发
+    if not is_poke and get_plain_text(msg).startswith("/"):  # 命令消息不触发
+        return
+    if is_poke and poke_target != self_id:  # 别人戳别人，只入时间线
         return
 
     status = GroupStatus.load(msg.group_id)
@@ -515,7 +572,10 @@ async def chat(msg: Message):
     if status.last_reply_time and msg.time.timestamp() <= status.last_reply_time:
         return
     
-    info(f"{msg.group_id} 的新消息 {msg.msg_id} {msg.nickname}({msg.user_id}): {get_plain_text(msg)}")
+    if is_poke:
+        info(f"{msg.group_id} 的戳一戳 {msg.nickname}({msg.user_id}) -> {poke_target}")
+    else:
+        info(f"{msg.group_id} 的新消息 {msg.msg_id} {msg.nickname}({msg.user_id}): {get_plain_text(msg)}")
     
     # ---------------- 更新意愿值 ---------------- #
 
@@ -525,26 +585,29 @@ async def chat(msg: Message):
         if status.last_check_willing_time:
             time_passed = time.time() - status.last_check_willing_time
             delta -= min(config.get('chat.willing.decrease_per_minute') * time_passed / 60.0, status.willingness)
-        # 每条消息增加
-        delta += config.get('chat.willing.increase_per_msg')
-        # 基于消息内容调整（@ 和回复可以同时生效，各自最多加一次）
-        got_at = False
-        got_reply = False
-        for seg in msg.msg:
-            stype, sdata = seg['type'], seg['data']
-            if not got_at and stype == 'at' and int(sdata['qq']) == self_id:
-                delta += config.get('chat.willing.increase_per_at')
-                got_at = True
-            if not got_reply and stype == 'reply' and int(sdata['id']) in status.self_msg_ids:
-                delta += config.get('chat.willing.increase_per_reply')
-                got_reply = True
-            if got_at and got_reply:
-                break
-        # 基于关键字调整
-        plain_text = get_plain_text(msg).lower()
-        for kw, value in config.get('chat.willing.increase_keywords').items():
-            if kw.lower() in plain_text:
-                delta += value
+        if is_poke:
+            delta += config.get('chat.willing.increase_per_poke')
+        else:
+            # 每条消息增加
+            delta += config.get('chat.willing.increase_per_msg')
+            # 基于消息内容调整（@ 和回复可以同时生效，各自最多加一次）
+            got_at = False
+            got_reply = False
+            for seg in msg.msg:
+                stype, sdata = seg['type'], seg['data']
+                if not got_at and stype == 'at' and int(sdata['qq']) == self_id:
+                    delta += config.get('chat.willing.increase_per_at')
+                    got_at = True
+                if not got_reply and stype == 'reply' and int(sdata['id']) in status.self_msg_ids:
+                    delta += config.get('chat.willing.increase_per_reply')
+                    got_reply = True
+                if got_at and got_reply:
+                    break
+            # 基于关键字调整
+            plain_text = get_plain_text(msg).lower()
+            for kw, value in config.get('chat.willing.increase_keywords').items():
+                if kw.lower() in plain_text:
+                    delta += value
         # 群组调整
         delta *= config.get('chat.willing.group_scale').get(str(msg.group_id), 1.0)
         last_willingness = status.willingness
@@ -574,8 +637,15 @@ async def chat(msg: Message):
         # 隐藏所有命令消息
         recent_msgs = [m for m in recent_msgs if not get_plain_text(m).startswith("/")]
         # 如果历史消息中没有当前消息，则添加
-        if not any(m.msg_id == msg.msg_id for m in recent_msgs):
+        if not is_poke and msg.msg_id and not any(m.msg_id == msg.msg_id for m in recent_msgs):
             recent_msgs.append(msg)
+        since = min((m.time for m in recent_msgs), default=msg.time)
+        poke_keys = {_poke_key(m) for m in recent_msgs if _is_poke_msg(m)}
+        for poke in collect_recent_pokes(msg.group_id, since):
+            key = _poke_key(poke)
+            if key not in poke_keys:
+                recent_msgs.append(poke)
+                poke_keys.add(key)
         info(f"获取最近共 {len(recent_msgs)} 条有效聊天记录")
 
         recent_text = await format_msgs(
@@ -584,6 +654,7 @@ async def chat(msg: Message):
             image_caption_prob=config.get('image_caption.image_prob'),
             emotion_caption_limit=config.get('image_caption.emotion_limit'),
             emotion_caption_prob=config.get('image_caption.emotion_prob'),
+            self_id=self_id,
         )
         recent_summary = await generate_summary(recent_text)
         if recent_summary == "":
