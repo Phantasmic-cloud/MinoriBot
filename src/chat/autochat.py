@@ -234,6 +234,16 @@ async def handle_poke_group_member(cid: str, group_id: int, user_id: int):
     return ret
 
 
+@rpc_method(RPC_SERVICE, "set_msg_emoji_like")
+async def handle_set_msg_emoji_like(cid: str, group_id: int, message_id: int, emoji_id: str):
+    if not chat_gwl.check_id(group_id) or not autochat_gwl.check_id(group_id):
+        logger.warning("自动聊天取消贴表情到未启用群组 %s", group_id)
+        return
+    bot = get_bot()
+    logger.info("自动聊天RPC客户端 %s 给群 %s 消息 %s 贴表情 %s", cid, group_id, message_id, emoji_id)
+    return await bot.set_msg_emoji_like(int(message_id), str(emoji_id))
+
+
 @rpc_method(RPC_SERVICE, "get_group_history_msg")
 async def handle_get_group_msg(cid: str, group_id: int, limit: int):
     msgs = await query_recent_msg(group_id, limit)

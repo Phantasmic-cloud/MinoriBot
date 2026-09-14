@@ -40,9 +40,13 @@ async def rpc_send_group_msg(group_id: int, message: str):
 async def rpc_poke_group_member(group_id: int, user_id: int):
     return await rpc_session.call('poke_group_member', group_id, user_id)
 
+async def rpc_set_msg_emoji_like(group_id: int, message_id: int, emoji_id: str):
+    return await rpc_session.call('set_msg_emoji_like', group_id, message_id, emoji_id)
+
 
 MAX_ACTIONS = 5
 MAX_TEXT_ACTIONS = 3
+MAX_REACT_ACTIONS = 3
 
 
 def _parse_poke_ids(raw) -> list[int]:
@@ -72,6 +76,37 @@ def _sticker_query_ok(query) -> bool:
     return isinstance(query, dict) and bool(query.get('emotion') or query.get('scene'))
 
 
+def _emoji_to_id(raw) -> str | None:
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        eid = str(int(raw))
+        return eid if eid.isdigit() and int(eid) > 0 else None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return text if int(text) > 0 else None
+    ch = text[0]
+    cp = ord(ch)
+    if cp < 128:
+        return None
+    return str(cp)
+
+
+def _parse_react(raw) -> tuple[int, str] | None:
+    if not isinstance(raw, list) or len(raw) < 2:
+        return None
+    try:
+        msg_id = int(raw[0])
+    except (TypeError, ValueError):
+        return None
+    emoji_id = _emoji_to_id(raw[1])
+    if emoji_id is None:
+        return None
+    return msg_id, emoji_id
+
+
 def _expand_action_item(item) -> list[dict]:
     if isinstance(item, str):
         text = item.strip()
@@ -90,6 +125,10 @@ def _expand_action_item(item) -> list[dict]:
                 actions.append({'kind': 'poke', 'ids': ids})
         elif key == 'sticker' and _sticker_query_ok(val):
             actions.append({'kind': 'sticker', 'query': val})
+        elif key == 'react':
+            react = _parse_react(val)
+            if react:
+                actions.append({'kind': 'react', 'msg_id': react[0], 'emoji_id': react[1]})
     return actions
 
 
@@ -102,6 +141,7 @@ def _parse_actions(llm_response: dict) -> list[dict]:
 
     out: list[dict] = []
     text_n = 0
+    react_n = 0
     for action in actions:
         if len(out) >= MAX_ACTIONS:
             break
@@ -109,6 +149,10 @@ def _parse_actions(llm_response: dict) -> list[dict]:
             if text_n >= MAX_TEXT_ACTIONS:
                 continue
             text_n += 1
+        elif action['kind'] == 'react':
+            if react_n >= MAX_REACT_ACTIONS:
+                continue
+            react_n += 1
         out.append(action)
     return out
 
@@ -886,6 +930,16 @@ async def chat(msg: Message):
                 except Exception as e:
                     warning(f"戳一戳失败 user_id={uid}: {get_exc_desc(e)}")
 
+        async def process_react(msg_id: int, emoji_id: str):
+            if not any(int(m.msg_id) == msg_id for m in recent_msgs):
+                info(f"贴表情跳过，消息不在最近记录中: msg_id={msg_id}")
+                return
+            try:
+                await rpc_set_msg_emoji_like(msg.group_id, msg_id, emoji_id)
+                info(f"贴表情成功: msg_id={msg_id} emoji_id={emoji_id}")
+            except Exception as e:
+                warning(f"贴表情失败 msg_id={msg_id} emoji_id={emoji_id}: {get_exc_desc(e)}")
+
         sticker_hits: dict[int, tuple] = {}
         sticker_indexes = [i for i, a in enumerate(actions) if a['kind'] == 'sticker']
         if sticker_indexes:
@@ -928,6 +982,8 @@ async def chat(msg: Message):
                 await process_sticker(action['hit'], action.get('query'))
             elif kind == 'poke':
                 await process_poke(action['ids'])
+            elif kind == 'react':
+                await process_react(action['msg_id'], action['emoji_id'])
 
     except:
         error(f"发送回复时失败")
