@@ -18,6 +18,14 @@ def match_list_regexp(reg_list: list[str], txt: str) -> re.Match | None:
     return None
 
 
+def name_allowed(name: str, mode: str | None, rules: list[str] | None) -> bool:
+    """blacklist 命中规则则隐藏，whitelist 只保留命中规则的。"""
+    hit = match_list_regexp(rules or [], name) is not None
+    if str(mode or "blacklist").lower() == "whitelist":
+        return hit
+    return not hit
+
+
 def auto_convert_byte(value: float, suffix: str = "", unit_index: int = 0, with_space: bool = False) -> str:
     """把字节数换成可读单位。"""
     v = float(value or 0)

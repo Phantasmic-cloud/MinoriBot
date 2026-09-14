@@ -11,7 +11,7 @@ import psutil
 
 from src.utils import *
 
-from .util import format_cpu_freq, format_uptime, match_list_regexp
+from .util import format_cpu_freq, format_uptime, name_allowed
 
 config = Config("status")
 logger = get_logger("status")
@@ -195,8 +195,9 @@ def _system_name_sync() -> str:
 
 
 def _disk_usage_sync() -> list[DiskUsage]:
-    ignore_parts = list(config.get("ignore_parts", []) or [])
-    ignore_bad = bool(config.get("ignore_bad_parts", False))
+    mode = config.get("parts.mode", "blacklist")
+    rules = list(config.get("parts.rules", []) or [])
+    ignore_bad = bool(config.get("parts.ignore_bad", False))
     usage: list[DiskUsage] = []
     try:
         parts = psutil.disk_partitions()
@@ -205,7 +206,7 @@ def _disk_usage_sync() -> list[DiskUsage]:
         return usage
     for disk in parts:
         mountpoint = disk.mountpoint
-        if match_list_regexp(ignore_parts, mountpoint):
+        if not name_allowed(mountpoint, mode, rules):
             continue
         try:
             u = psutil.disk_usage(mountpoint)
@@ -215,24 +216,25 @@ def _disk_usage_sync() -> list[DiskUsage]:
             usage.append(DiskUsage(name=mountpoint, exception=str(e)))
             continue
         usage.append(DiskUsage(name=mountpoint, percent=u.percent, used=u.used, total=u.total))
-    if config.get("sort_parts", True):
-        reverse = not bool(config.get("sort_parts_reverse", False))
+    if config.get("parts.sort", True):
+        reverse = not bool(config.get("parts.sort_reverse", False))
         usage.sort(key=lambda x: x.percent if x.percent is not None else -1, reverse=reverse)
     return usage
 
 
 def _process_status_sync(procs: list[psutil.Process]) -> list[ProcStatus]:
-    limit = int(config.get("proc_len", 5) or 0)
+    limit = int(config.get("procs.len", 5) or 0)
     if limit <= 0:
         return []
-    ignore = list(config.get("ignore_procs", []) or [])
+    mode = config.get("procs.mode", "blacklist")
+    rules = list(config.get("procs.rules", []) or [])
     cpu_count = psutil.cpu_count() or 1
-    max_100 = bool(config.get("proc_cpu_max_100p", False))
+    max_100 = bool(config.get("procs.cpu_max_100p", False))
     items: list[ProcStatus] = []
     for proc in procs:
         try:
             name = proc.name()
-            if match_list_regexp(ignore, name):
+            if not name_allowed(name, mode, rules):
                 continue
             # cpu_percent 不能放进 oneshot：oneshot 会缓存同一份 cpu_times，第二次采样算不出 delta
             cpu = proc.cpu_percent()
@@ -244,7 +246,7 @@ def _process_status_sync(procs: list[psutil.Process]) -> list[ProcStatus]:
             items.append(ProcStatus(name=name, cpu=cpu, mem=mem))
         except (psutil.Error, OSError):
             continue
-    sort_by = str(config.get("proc_sort_by", "cpu") or "cpu").lower()
+    sort_by = str(config.get("procs.sort_by", "cpu") or "cpu").lower()
     if sort_by in ("mem", "men", "memory"):
         items.sort(key=lambda x: x.mem, reverse=True)
     else:
@@ -253,11 +255,12 @@ def _process_status_sync(procs: list[psutil.Process]) -> list[ProcStatus]:
 
 
 def _calc_disk_io(past, now, dt: float) -> list[NamedRate]:
-    ignore = list(config.get("ignore_disk_ios", []) or [])
-    ignore_zero = bool(config.get("ignore_no_io_disk", False))
+    mode = config.get("disk_io.mode", "blacklist")
+    rules = list(config.get("disk_io.rules", []) or [])
+    ignore_zero = bool(config.get("disk_io.ignore_zero", False))
     out: list[NamedRate] = []
     for name, old in past.items():
-        if name not in now or match_list_regexp(ignore, name):
+        if name not in now or not name_allowed(name, mode, rules):
             continue
         new = now[name]
         read = (new.read_bytes - old.read_bytes) / dt
@@ -265,17 +268,18 @@ def _calc_disk_io(past, now, dt: float) -> list[NamedRate]:
         if ignore_zero and read == 0 and write == 0:
             continue
         out.append(NamedRate(name=name, read=read, write=write))
-    if config.get("sort_disk_ios", True):
+    if config.get("disk_io.sort", True):
         out.sort(key=lambda x: x.read + x.write, reverse=True)
     return out
 
 
 def _calc_net_io(past, now, dt: float) -> list[NamedRate]:
-    ignore = list(config.get("ignore_nets", []) or [])
-    ignore_zero = bool(config.get("ignore_0b_net", False))
+    mode = config.get("nets.mode", "blacklist")
+    rules = list(config.get("nets.rules", []) or [])
+    ignore_zero = bool(config.get("nets.ignore_zero", False))
     out: list[NamedRate] = []
     for name, old in past.items():
-        if name not in now or match_list_regexp(ignore, name):
+        if name not in now or not name_allowed(name, mode, rules):
             continue
         new = now[name]
         sent = (new.bytes_sent - old.bytes_sent) / dt
@@ -283,14 +287,14 @@ def _calc_net_io(past, now, dt: float) -> list[NamedRate]:
         if ignore_zero and sent == 0 and recv == 0:
             continue
         out.append(NamedRate(name=name, sent=sent, recv=recv))
-    if config.get("sort_nets", True):
+    if config.get("nets.sort", True):
         out.sort(key=lambda x: x.sent + x.recv, reverse=True)
     return out
 
 
 async def _test_sites() -> list[SiteResult]:
-    sites = list(config.get("test_sites", []) or [])
-    timeout = float(config.get("test_timeout", 5) or 5)
+    sites = list(config.get("sites.items", []) or [])
+    timeout = float(config.get("sites.timeout", 5) or 5)
     session = get_client_session()
 
     async def one(site: dict) -> SiteResult:
@@ -309,7 +313,7 @@ async def _test_sites() -> list[SiteResult]:
             return SiteResult(name=name, error=type(e).__name__)
 
     res = await asyncio.gather(*(one(s) for s in sites if isinstance(s, dict)))
-    if config.get("sort_sites", True):
+    if config.get("sites.sort", True):
         res = list(res)
         res.sort(key=lambda x: x.delay if x.delay is not None else -1)
     return list(res)

@@ -1,37 +1,48 @@
 # 状态图配置。背景图放 data/status/bg/，随机抽一张，不走网络。
 # 布局按 650 宽画，scale=2 时输出 1300 宽。
-scale: 2
 
-need_at: true
-show_current_bot_only: false
-ob_v11_use_get_status: true
-disconnect_reset_counter: true
+scale: 2                          # 输出倍率，2 即 1300 宽
+show_current_bot_only: false      # 只画当前账号，false 则画全部在线 bot
+ob_v11_use_get_status: true       # 优先用 OneBot get_status 的收发计数
+disconnect_reset_counter: true    # 账号掉线后清掉本地收发计数
 
-ignore_parts: 
-  - '^/snap/'
-ignore_bad_parts: false
-sort_parts: true
-sort_parts_reverse: false
+# mode: blacklist 匹配 rules 的不显示；whitelist 只显示匹配 rules 的
+# rules 是正则列表，空 blacklist=全显示，空 whitelist=全不显示
 
-ignore_disk_ios:
-  - '^(loop|zram)\d*$'
-ignore_no_io_disk: false
-sort_disk_ios: true
+parts:
+  mode: blacklist                 # 磁盘分区占用过滤
+  rules:
+    - '^/snap/'
+  ignore_bad: false               # 读失败的分区是否跳过
+  sort: true                      # 按占用率排序
+  sort_reverse: false             # true 则占用低的排前面
 
-ignore_nets:
-  - '^lo(op)?\d*$|^(Loopback|本地连接)'
-ignore_0b_net: false
-sort_nets: true
+disk_io:
+  mode: blacklist                 # 磁盘读写速率过滤
+  rules:
+    - '^(loop|zram)\d*$'
+  ignore_zero: false              # 读写都是 0 的盘是否跳过
+  sort: true                      # 按读写总量排序
 
-test_sites:
-  - name: 百度
-    url: https://www.baidu.com/
-test_timeout: 1
-sort_sites: true
+nets:
+  mode: blacklist                 # 网卡速率过滤
+  rules:
+    - '^lo(op)?\d*$|^(Loopback|本地连接)'
+  ignore_zero: false              # 收发都是 0 的网卡是否跳过
+  sort: true                      # 按收发总量排序
 
-proc_len: 10
-ignore_procs:
-  - '^System Idle Process$'
-  - '^(kthreadd|kworker/|ksoftirqd/|migration/|rcu_|cpuhp/|idle_inject/)'
-proc_sort_by: mem         # cpu / mem
-proc_cpu_max_100p: false
+sites:
+  timeout: 1                      # 测速超时（秒）
+  sort: true                      # 按延迟排序
+  items:
+    - name: 百度
+      url: https://www.baidu.com/
+
+procs:
+  mode: blacklist                 # 进程列表过滤
+  rules:
+    - '^System Idle Process$'
+    - '^(kthreadd|kworker/|ksoftirqd/|migration/|rcu_|cpuhp/|idle_inject/)'
+  len: 10                         # 最多显示几条
+  sort_by: mem                    # cpu / mem
+  cpu_max_100p: false             # true 则 CPU 按逻辑核心数折成最高 100%
