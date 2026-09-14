@@ -437,7 +437,7 @@ def _poke_key(msg: Message) -> tuple[int, int, int]:
 
 
 group_pokes: dict[int, list[Message]] = {}
-POKE_KEEP = 50
+POKE_KEEP = 10
 
 
 def remember_poke(msg: Message):
@@ -709,7 +709,11 @@ async def chat(msg: Message):
                 sm_text += "你自己过去的回复记录供参考:\n"
                 sm_text += "```\n"
                 for sm in sms:
-                    sm_text += f"{get_readable_datetime(sm.time)} [{sm.id}]: {sm.text}\n"
+                    if sm.sticker:
+                        body = f"[表情包: {sm.sticker}]"
+                    else:
+                        body = sm.text
+                    sm_text += f"{get_readable_datetime(sm.time)} [{sm.id}]: {body}\n"
                 sm_text += "```\n"
 
         # 获取用户记忆
@@ -810,7 +814,7 @@ async def chat(msg: Message):
     # ---------------- 发送动作 ---------------- #
 
     try:
-        send_msg_id_texts: list[tuple[int, str]] = []
+        send_msg_id_texts: list[tuple[int, str, str]] = []
         first_action = True
 
         async def wait_interval():
@@ -847,11 +851,11 @@ async def chat(msg: Message):
 
             send_ret = await rpc_send_group_msg(msg.group_id, text)
             send_msg_id = int(send_ret['message_id'])
-            send_msg_id_texts.append((send_msg_id, text))
+            send_msg_id_texts.append((send_msg_id, 'text', text))
             info(f"发送回复{index}成功: send_msg_id={send_msg_id}")
             await note_sent_msg(send_msg_id)
 
-        async def process_sticker(hit: tuple):
+        async def process_sticker(hit: tuple, query: dict | None = None):
             sticker_path, sticker_sid, sticker_all_sids, sticker_old_multipliers = hit
             if not sticker_path:
                 info("未匹配到表情包，跳过发送")
@@ -860,9 +864,14 @@ async def chat(msg: Message):
             send_msg_id = int(send_ret['message_id'])
             await note_sent_msg(send_msg_id)
             info(f"表情包发送成功: sid={sticker_sid}")
-            sticker_captions = [text.replace(',', '/') for sid, text, path, full_emb, emotion_emb in _sticker_cache if sid == sticker_sid]
-            sticker_desc = ' | '.join(sticker_captions) if sticker_captions else f"sid={sticker_sid}"
-            send_msg_id_texts.append((send_msg_id, f"[表情包: {sticker_desc}]"))
+            query = query or {}
+            emotion = str(query.get('emotion') or '').strip()
+            scene = str(query.get('scene') or '').strip()
+            if emotion and scene:
+                sticker_desc = f"{emotion}/{scene}"
+            else:
+                sticker_desc = emotion or scene or f"sid={sticker_sid}"
+            send_msg_id_texts.append((send_msg_id, 'sticker', sticker_desc))
             update_sticker_multipliers(msg.group_id, sticker_sid, sticker_all_sids)
             changed = [f"sid={s}({sticker_old_multipliers[s]:.1f}→{get_sticker_multiplier(msg.group_id, s):.1f})"
                        for s in sticker_all_sids if abs(get_sticker_multiplier(msg.group_id, s) - sticker_old_multipliers[s]) > 0.001]
@@ -916,7 +925,7 @@ async def chat(msg: Message):
                 text_index += 1
                 await process_reply_text(text_index, action['text'])
             elif kind == 'sticker':
-                await process_sticker(action['hit'])
+                await process_sticker(action['hit'], action.get('query'))
             elif kind == 'poke':
                 await process_poke(action['ids'])
 
@@ -987,12 +996,12 @@ async def chat(msg: Message):
                     warning(f"解析用户记忆更新失败: {update}, err={get_exc_desc(e)}")
             
         # 添加自身记忆
-        for msg_id, text in send_msg_id_texts:
-            mem.sm_add(
-                msg_id=msg_id,
-                text=text,
-                keep_count=config.get('chat.mem.sm_keep_count'),
-            )
+        keep_count = config.get('chat.mem.sm_keep_count')
+        for msg_id, kind, content in send_msg_id_texts:
+            if kind == 'sticker':
+                mem.sm_add(msg_id=msg_id, keep_count=keep_count, sticker=content)
+            else:
+                mem.sm_add(msg_id=msg_id, keep_count=keep_count, text=content)
 
     except:
         error(f"更新记忆失败")

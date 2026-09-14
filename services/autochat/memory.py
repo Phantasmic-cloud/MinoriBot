@@ -31,8 +31,9 @@ class UserMemory:
 @dataclass
 class SelfMemory:
     id: str
-    text: str
     time: float
+    text: str = ""
+    sticker: str = ""
 
 
 class MemorySystem:
@@ -301,20 +302,26 @@ class MemorySystem:
                     break
         return results
 
-    def sm_add(self, msg_id: int, text: str, keep_count: int):
+    def sm_add(self, msg_id: int, keep_count: int, text: str = "", sticker: str = ""):
         """
         更新自身对话记忆。
 
         参数:
-            msgs (list[dict]): 新加入的对话消息列表。
+            msg_id (int): 发出的消息 ID。
             keep_count (int): 保留的消息数量。
+            text (str): 文字气泡内容。
+            sticker (str): 表情包描述，形如 情绪/场景。
         """
         sms = self.file_db.get('sms', [])
-        sms.append({
+        item = {
             'id': str(msg_id),
-            'text': text,
             'time': datetime.now().timestamp(),
-        })
+        }
+        if sticker:
+            item['sticker'] = sticker
+        else:
+            item['text'] = text
+        sms.append(item)
         sms = sms[-keep_count:]
         self.file_db.set('sms', sms)
         info(f"更新自身对话记忆，保留最近 {keep_count} 条消息")
