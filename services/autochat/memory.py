@@ -34,6 +34,7 @@ class SelfMemory:
     time: float
     text: str = ""
     sticker: str = ""
+    tts: str = ""
 
 
 class MemorySystem:
@@ -302,7 +303,7 @@ class MemorySystem:
                     break
         return results
 
-    def sm_add(self, msg_id: int, keep_count: int, text: str = "", sticker: str = ""):
+    def sm_add(self, msg_id: int, keep_count: int, text: str = "", sticker: str = "", tts: str = ""):
         """
         更新自身对话记忆。
 
@@ -311,6 +312,7 @@ class MemorySystem:
             keep_count (int): 保留的消息数量。
             text (str): 文字气泡内容。
             sticker (str): 表情包描述，形如 情绪/场景。
+            tts (str): 语音台词。
         """
         sms = self.file_db.get('sms', [])
         item = {
@@ -319,6 +321,8 @@ class MemorySystem:
         }
         if sticker:
             item['sticker'] = sticker
+        elif tts:
+            item['tts'] = tts
         else:
             item['text'] = text
         sms.append(item)

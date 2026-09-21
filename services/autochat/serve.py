@@ -7,6 +7,56 @@ except ImportError:
 import re
 import json
 import numpy as np
+import os
+import sys
+import atexit
+
+AUTOCHAT_LOCK_PATH = "data/chat/autochat/autochat.lock"
+_autochat_lock_fp = None
+
+
+def _acquire_autochat_lock():
+    """py / rs 共用同一把锁，避免两个微服务同时连上主程序。"""
+    global _autochat_lock_fp
+    os.makedirs(os.path.dirname(AUTOCHAT_LOCK_PATH), exist_ok=True)
+    _autochat_lock_fp = open(AUTOCHAT_LOCK_PATH, "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            _autochat_lock_fp.seek(0)
+            msvcrt.locking(_autochat_lock_fp.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(_autochat_lock_fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        error("已有 autochat 微服务在运行（Python 或 Rust），请先关掉再启动")
+        sys.exit(1)
+    _autochat_lock_fp.seek(0)
+    _autochat_lock_fp.truncate()
+    _autochat_lock_fp.write(str(os.getpid()))
+    _autochat_lock_fp.flush()
+    atexit.register(_release_autochat_lock)
+
+
+def _release_autochat_lock():
+    global _autochat_lock_fp
+    if _autochat_lock_fp is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+            _autochat_lock_fp.seek(0)
+            msvcrt.locking(_autochat_lock_fp.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(_autochat_lock_fp.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        _autochat_lock_fp.close()
+    except OSError:
+        pass
+    _autochat_lock_fp = None
 
 
 def debug_mode() -> bool:
@@ -37,6 +87,10 @@ async def rpc_get_self_info(group_id: int):
 async def rpc_send_group_msg(group_id: int, message: str):
     return await rpc_session.call('send_group_msg', group_id, message)
 
+async def rpc_synth_tts(text: str):
+    timeout = float(config.get('chat.voice.timeout', 15) or 15) + 5
+    return await rpc_session.call('synth_tts', text, timeout=timeout)
+
 async def rpc_poke_group_member(group_id: int, user_id: int):
     return await rpc_session.call('poke_group_member', group_id, user_id)
 
@@ -44,9 +98,10 @@ async def rpc_set_msg_emoji_like(group_id: int, message_id: int, emoji_id: str):
     return await rpc_session.call('set_msg_emoji_like', group_id, message_id, emoji_id)
 
 
-MAX_ACTIONS = 5
+MAX_ACTIONS = 6
 MAX_TEXT_ACTIONS = 3
 MAX_REACT_ACTIONS = 3
+MAX_TTS_ACTIONS = 1
 
 
 def _parse_poke_ids(raw) -> list[int]:
@@ -125,6 +180,10 @@ def _expand_action_item(item) -> list[dict]:
                 actions.append({'kind': 'poke', 'ids': ids})
         elif key == 'sticker' and _sticker_query_ok(val):
             actions.append({'kind': 'sticker', 'query': val})
+        elif key == 'tts':
+            text = str(val).strip() if val is not None else ''
+            if text:
+                actions.append({'kind': 'tts', 'text': text})
         elif key == 'react':
             react = _parse_react(val)
             if react:
@@ -142,6 +201,7 @@ def _parse_actions(llm_response: dict) -> list[dict]:
     out: list[dict] = []
     text_n = 0
     react_n = 0
+    tts_n = 0
     for action in actions:
         if len(out) >= MAX_ACTIONS:
             break
@@ -153,6 +213,10 @@ def _parse_actions(llm_response: dict) -> list[dict]:
             if react_n >= MAX_REACT_ACTIONS:
                 continue
             react_n += 1
+        elif action['kind'] == 'tts':
+            if tts_n >= MAX_TTS_ACTIONS:
+                continue
+            tts_n += 1
         out.append(action)
     return out
 
@@ -402,6 +466,159 @@ def schedule_sticker_fill():
 
 # 按群隔离的表情包倍率: {group_id: {sid: float}}
 sticker_multipliers: dict[int, dict[int, float]] = {}
+
+
+# ================ 预录语音匹配 ================= #
+
+VOICE_DB_PATH = "data/chat/autochat/voice_db.json"
+_TTS_TOKEN_RE = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]+")
+_voice_clips: list[dict] = []
+_voice_db_mtime: float | None = None
+
+
+def _plain_tts_text(text: str) -> str:
+    text = str(text or "")
+    text = re.sub(r"\[@\d+\]", "", text)
+    text = re.sub(r"\[reply=-?\d+\]", "", text)
+    return " ".join(text.replace("\r", " ").replace("\n", " ").split()).strip()
+
+
+def _match_chars(text: str) -> str:
+    return "".join(_TTS_TOKEN_RE.findall(text or ""))
+
+
+def _jaccard(a: str, b: str) -> float:
+    sa, sb = set(a), set(b)
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+def _len_ratio(a: str, b: str) -> float:
+    la, lb = len(a), len(b)
+    if la <= 0 or lb <= 0:
+        return 0.0
+    return min(la, lb) / max(la, lb)
+
+
+def _load_voice_clips() -> list[dict]:
+    global _voice_clips, _voice_db_mtime
+    try:
+        mtime = os.path.getmtime(VOICE_DB_PATH)
+    except FileNotFoundError:
+        _voice_clips = []
+        _voice_db_mtime = None
+        return _voice_clips
+    except Exception as e:
+        warning(f"读取语音库失败: {get_exc_desc(e)}")
+        return _voice_clips
+    if _voice_db_mtime == mtime:
+        return _voice_clips
+    try:
+        with open(VOICE_DB_PATH, 'r', encoding='utf-8') as f:
+            db = json.load(f)
+    except Exception as e:
+        warning(f"读取语音库失败: {get_exc_desc(e)}")
+        return _voice_clips
+    clips = []
+    for v in (db.get('voices') or {}).values():
+        path = os.path.abspath(str(v.get('path') or ''))
+        tag = str(v.get('tag') or '').strip()
+        if not tag or not path or not os.path.isfile(path):
+            continue
+        clips.append({'vid': int(v.get('vid') or 0), 'path': path, 'tag': tag})
+    _voice_clips = clips
+    _voice_db_mtime = mtime
+    info(f"已加载语音库 {len(clips)} 条")
+    return _voice_clips
+
+
+def _coarse_voice_candidates(text: str, clips: list[dict]) -> list[dict]:
+    query = _match_chars(text)
+    if not query:
+        return []
+    limit = int(config.get('chat.voice.candidate_limit', 40) or 40)
+    min_jaccard = float(config.get('chat.voice.min_jaccard', 0.15) or 0)
+    min_len_ratio = float(config.get('chat.voice.min_len_ratio', 0.5) or 0)
+    scored = []
+    for clip in clips:
+        tag_chars = _match_chars(clip['tag'])
+        jac = _jaccard(query, tag_chars)
+        ratio = _len_ratio(query, tag_chars)
+        if jac < min_jaccard and ratio < min_len_ratio:
+            continue
+        scored.append((jac, ratio, clip))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [c for _, _, c in scored[: max(limit, 1)]]
+
+
+def _parse_match_index(raw: str, n: int) -> int:
+    m = re.search(r"-?\d+", str(raw or ""))
+    if not m:
+        return 0
+    try:
+        idx = int(m.group())
+    except ValueError:
+        return 0
+    return idx if 1 <= idx <= n else 0
+
+
+async def _llm_pick_voice(text: str, candidates: list[dict]) -> dict | None:
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        query = _match_chars(text)
+        tag_chars = _match_chars(candidates[0]['tag'])
+        if _jaccard(query, tag_chars) >= 0.8:
+            return candidates[0]
+    models = config.get('chat.voice.model') or []
+    prompt_tpl = str(config.get('chat.voice.prompt') or '').strip()
+    if not models or not prompt_tpl:
+        return None
+    lines = "\n".join(f"{i}. {c['tag']}" for i, c in enumerate(candidates, 1))
+    prompt = prompt_tpl.replace("{text}", text).replace("{candidates}", lines)
+    timeout = float(config.get('chat.voice.match_timeout', 8) or 8)
+    max_tokens = int(config.get('chat.voice.max_tokens', 64) or 64)
+    try:
+        resp = await rpc_query_llm(models, prompt, options={
+            'timeout': timeout,
+            'max_tokens': max_tokens,
+        })
+        raw = str(resp.result if hasattr(resp, 'result') else resp or '').strip()
+        idx = _parse_match_index(raw, len(candidates))
+        if idx:
+            hit = candidates[idx - 1]
+            info(f"语音匹配选中 vid={hit['vid']} tag={hit['tag']} raw={truncate(raw, 32)}")
+            return hit
+        info(f"语音匹配无合适条目 raw={truncate(raw, 32)}")
+    except Exception as e:
+        warning(f"语音匹配小模型失败: {get_exc_desc(e)}")
+    return None
+
+
+def _tts_model_configured() -> bool:
+    return bool(str(config.get('chat.voice.tts_model') or '').strip())
+
+
+async def resolve_voice_action(text: str) -> tuple[str, str]:
+    """返回 (kind, payload)。file=预录/合成文件，text=回退文字。匹配或合成都在执行时间线前完成。"""
+    text = _plain_tts_text(text)
+    if not text:
+        return 'skip', ''
+    clips = _load_voice_clips()
+    exact = next((c for c in clips if c['tag'] == text), None)
+    if exact:
+        return 'file', exact['path']
+    pick = await _llm_pick_voice(text, _coarse_voice_candidates(text, clips))
+    if pick:
+        return 'file', pick['path']
+    if not _tts_model_configured():
+        return 'text', text
+    ret = await rpc_synth_tts(text)
+    path = ret.get('path') if isinstance(ret, dict) else None
+    if not path or not os.path.isfile(path):
+        raise Exception("合成语音未返回文件")
+    return 'file', path
 
 def get_sticker_multiplier(group_id: int, sid: int) -> float:
     return sticker_multipliers.get(group_id, {}).get(sid, 1.0)
@@ -857,6 +1074,8 @@ async def chat(msg: Message):
                 for sm in sms:
                     if sm.sticker:
                         body = f"[表情包: {sm.sticker}]"
+                    elif sm.tts:
+                        body = f"[语音: {sm.tts}]"
                     else:
                         body = sm.text
                     sm_text += f"{get_readable_datetime(sm.time)} [{sm.id}]: {body}\n"
@@ -1042,39 +1261,89 @@ async def chat(msg: Message):
             except Exception as e:
                 warning(f"贴表情失败 msg_id={msg_id} emoji_id={emoji_id}: {get_exc_desc(e)}")
 
+        async def process_tts(text: str, hit: tuple[str, str] | None):
+            text = str(text or "").strip()
+            if not text:
+                info("TTS文本为空，跳过发送")
+                return
+            kind, payload = hit if hit else ('text', text)
+            try:
+                if kind == 'skip':
+                    info("TTS文本为空，跳过发送")
+                    return
+                if kind == 'file':
+                    info(f"自动聊天发送语音: {text}")
+                    send_ret = await rpc_send_group_msg(msg.group_id, f"[CQ:record,file=file://{payload}]")
+                    if send_ret and 'message_id' in send_ret:
+                        send_msg_id = int(send_ret['message_id'])
+                        send_msg_id_texts.append((send_msg_id, 'tts', text))
+                        info(f"语音发送成功: send_msg_id={send_msg_id}")
+                        await note_sent_msg(send_msg_id)
+                        return
+                    info("语音未发出，回退文字")
+            except Exception as e:
+                warning(f"语音发送失败，回退文字: {get_exc_desc(e)}")
+            await process_reply_text(text_index + 1, text)
+
         sticker_hits: dict[int, tuple] = {}
+        tts_hits: dict[int, tuple[str, str]] = {}
         sticker_indexes = [i for i, a in enumerate(actions) if a['kind'] == 'sticker']
-        if sticker_indexes:
+        tts_indexes = [i for i, a in enumerate(actions) if a['kind'] == 'tts']
+
+        async def prefetch_stickers():
             can_search = await prepare_sticker_search()
-            if can_search:
-                async def prefetch_stickers():
+            if not can_search:
+                return
+            try:
+                async def _search():
                     for i in sticker_indexes:
                         sticker_hits[i] = await search_sticker(msg.group_id, actions[i]['query'])
+                await asyncio.wait_for(_search(), timeout=float(config.get('chat.sticker.timeout')))
+            except asyncio.TimeoutError:
+                warning("Sticker搜索超时，抛弃未就绪的表情包")
+            except BaseException as e:
+                warning(f"Sticker搜索失败: {get_exc_desc(e)}")
 
+        async def prefetch_voices():
+            timeout = float(config.get('chat.voice.timeout', 15) or 15)
+            match_timeout = float(config.get('chat.voice.match_timeout', 8) or 8)
+            wait = timeout + match_timeout + 5
+            for i in tts_indexes:
                 try:
-                    await asyncio.wait_for(
-                        prefetch_stickers(),
-                        timeout=float(config.get('chat.sticker.timeout')),
-                    )
-                except asyncio.TimeoutError:
-                    warning("Sticker搜索超时，抛弃未就绪的表情包")
-                except BaseException as e:
-                    warning(f"Sticker搜索失败: {get_exc_desc(e)}")
+                    tts_hits[i] = await asyncio.wait_for(resolve_voice_action(actions[i]['text']), timeout=wait)
+                except Exception as e:
+                    warning(f"语音预取失败，回退文字: {get_exc_desc(e)}")
+                    tts_hits[i] = ('text', actions[i]['text'])
+
+        prefetch_tasks = []
+        if sticker_indexes:
+            prefetch_tasks.append(prefetch_stickers())
+        if tts_indexes:
+            prefetch_tasks.append(prefetch_voices())
+        if prefetch_tasks:
+            try:
+                await asyncio.gather(*prefetch_tasks)
+            except BaseException as e:
+                warning(f"动作预取失败: {get_exc_desc(e)}")
+            if sticker_indexes:
                 schedule_sticker_fill()
 
         exec_actions = []
         for i, action in enumerate(actions):
-            if action['kind'] != 'sticker':
-                exec_actions.append(action)
+            if action['kind'] == 'sticker':
+                hit = sticker_hits.get(i)
+                if not hit or not hit[0]:
+                    if i not in sticker_hits:
+                        info("表情包未就绪，跳过发送")
+                    else:
+                        info("未匹配到表情包，跳过发送")
+                    continue
+                exec_actions.append({**action, 'hit': hit})
                 continue
-            hit = sticker_hits.get(i)
-            if not hit or not hit[0]:
-                if i not in sticker_hits:
-                    info("表情包未就绪，跳过发送")
-                else:
-                    info("未匹配到表情包，跳过发送")
+            if action['kind'] == 'tts':
+                exec_actions.append({**action, 'hit': tts_hits.get(i)})
                 continue
-            exec_actions.append({**action, 'hit': hit})
+            exec_actions.append(action)
 
         text_index = 0
         for action in exec_actions:
@@ -1089,6 +1358,8 @@ async def chat(msg: Message):
                 await process_poke(action['ids'])
             elif kind == 'react':
                 await process_react(action['msg_id'], action['emoji_id'])
+            elif kind == 'tts':
+                await process_tts(action['text'], action.get('hit'))
 
     except:
         error(f"发送回复时失败")
@@ -1161,6 +1432,8 @@ async def chat(msg: Message):
         for msg_id, kind, content in send_msg_id_texts:
             if kind == 'sticker':
                 mem.sm_add(msg_id=msg_id, keep_count=keep_count, sticker=content)
+            elif kind == 'tts':
+                mem.sm_add(msg_id=msg_id, keep_count=keep_count, tts=content)
             else:
                 mem.sm_add(msg_id=msg_id, keep_count=keep_count, text=content)
 
@@ -1218,4 +1491,5 @@ async def main():
 
 
 if __name__ == '__main__':
+    _acquire_autochat_lock()
     asyncio.run(main())

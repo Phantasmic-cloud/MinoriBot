@@ -1,8 +1,8 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 
 from src.core import NoticeEvent, on_notice
-from src.llm import ChatSession, ChatSessionResponse, get_text_embedding
+from src.llm import ChatSession, ChatSessionResponse, get_text_embedding, tts
 from src.record import before_record_hook
 from src.record.sql import query_recent_msg
 from src.utils import *
@@ -154,7 +154,12 @@ RPC_SERVICE = "autochat"
 
 
 def on_connect(session: RpcSession):
-    """RPC 客户端连上时给它建一个消息池。"""
+    """RPC 客户端连上时给它建一个消息池。同时只允许一个 autochat 微服务。"""
+    if message_pool:
+        others = ", ".join(message_pool)
+        logger.warning("已有 autochat 客户端在线 (%s)，拒绝 %s", others, session.id)
+        async_task("拒绝多余autochat连接", logger)(session.close)()
+        return
     message_pool[session.id] = []
 
 
@@ -214,6 +219,24 @@ async def handle_send_group_msg(cid: str, group_id: int, message: list[dict] | s
     bot = get_bot()
     logger.info("自动聊天RPC客户端 %s 发送消息到群 %s: %s", cid, group_id, message)
     return await bot.send_group_msg(group_id=int(group_id), message=message)
+
+
+def _autochat_tts_model_name() -> str:
+    return str(config.get("chat.voice.tts_model") or "").strip()
+
+
+@rpc_method(RPC_SERVICE, "synth_tts")
+async def handle_synth_tts(cid: str, text: str):
+    text = str(text or "").strip()
+    if not text:
+        raise Exception("tts 文本为空")
+    model_name = _autochat_tts_model_name()
+    if not model_name:
+        raise Exception("未配置 autochat.yaml 的 chat.voice.tts_model")
+    logger.info("自动聊天RPC客户端 %s 合成语音: %s", cid, truncate(text, 64))
+    with TempFilePath("mp3", remove_after=timedelta(minutes=3)) as path:
+        await tts(text, path, model_name=model_name)
+        return {"path": os.path.abspath(path)}
 
 
 @rpc_method(RPC_SERVICE, "poke_group_member")

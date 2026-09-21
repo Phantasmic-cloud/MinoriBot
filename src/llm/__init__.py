@@ -275,20 +275,28 @@ async def get_text_embedding(texts: List[str], model_name: str) -> List[List[flo
     return embeddings
 
 
-async def tts(text, save_path: str):
-    """把文本合成语音写到文件。"""
+async def tts(text, save_path: str, model_name: str | None = None):
+    """把文本合成语音写到文件。model_name 对应 llm.yaml 的 tts_models.name，不填用第一项。"""
     logger.info("TTS: %s", text)
     models = config.get("tts_models")
     assert models, "TTS模型列表为空"
-    model = models[0]
+    if model_name:
+        model = find_by(models, "name", model_name)
+        assert model is not None, f"TTS模型 {model_name} 不存在"
+    else:
+        model = models[0]
     provider = api_provider_mgr.get_provider(model["provider"])
+    assert provider is not None, f"TTS模型 {model['name']} 的供应方 {model['provider']} 不存在"
     provider.check_qps_limit()
     response = await provider.get_client().audio.speech.create(
         model=model["id"],
-        voice=model["voice"],
+        voice=model.get("voice") or "alloy",
         input=text,
     )
     response.write_to_file(save_path)
+    pricing = float(model.get("input_pricing") or 0)
+    if pricing:
+        await provider.aupdate_quota(-pricing * len(text))
     logger.info("TTS成功, 保存到: %s", save_path)
     return save_path
 
