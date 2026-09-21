@@ -1,0 +1,23 @@
+default_masterdata_update_check_timeout: 3    # 默认MasterData数据源检查更新超时时间（秒）
+default_masterdata_download_timeout: 10       # 默认MasterData下载超时时间（秒）
+default_rip_asset_download_timeout: 5         # 默认解包资源下载超时时间（秒）
+rip_img_cache_max_res: 256*256                # 解包资源图片缓存最大分辨率
+debug_log_img_cache: false                    # 是否启用解包资源图片缓存调试日志
+
+# 日服
+jp:
+  masterdata:
+    sources:
+      - name: "xxx"   # MaterData数据源名称
+        base_url: "https://raw.githubusercontent.com/xxx/xxx-sekai-master/refs/heads/main/master/"    # MasterData数据源基础URL，最终数据路径会类似: {base_url}cards.json
+        version_url: "https://raw.githubusercontent.com/xxx/xxx-sekai-master/refs/heads/main/versions/current_version.json" # MasterData版本信息URL
+
+  rip:  # 解包资源数据源
+    sources:
+      - name: "xxx" # 数据源名称，由于各家路径格式不同，程序内置了几个预设的名称对应的路径处理，详见 src/pjsk/asset.py 中的 DEFAULT_URL_MAP_METHODS
+        base_url: "https://xxx/jp-assets/"  # 数据源基础URL，最终资源路径会类似: {base_url}character/member/res005_no047/card_normal.png
+
+      - name: "xxx"
+        base_url: "https://xxx/"
+        prefixes: # 指定该数据源仅用于特定前缀
+          - "music"

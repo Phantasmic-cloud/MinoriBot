@@ -155,12 +155,57 @@ def dumps_json(data: Any, indent: bool = True) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+def create_folder(folder_path) -> str:
+    folder_path = str(folder_path)
+    os.makedirs(folder_path, exist_ok=True)
+    return folder_path
+
+
 def create_parent_folder(file_path) -> str:
     file_path = str(file_path)
     parent = os.path.dirname(file_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     return file_path
+
+
+def load_json(file_path: str) -> Any:
+    with open(file_path, "rb") as f:
+        return loads_json(f.read())
+
+
+def dump_json(data: Any, file_path: str, indent: bool = True) -> None:
+    create_parent_folder(file_path)
+    tmp_path = f"{file_path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(dumps_json(data, indent=indent))
+    os.replace(tmp_path, file_path)
+    try:
+        os.remove(tmp_path)
+    except OSError:
+        pass
+
+
+async def aload_json(path: str) -> Any:
+    return await run_in_pool(load_json, path)
+
+
+async def adump_json(data: Any, path: str):
+    return await run_in_pool(dump_json, data, path)
+
+
+async def download_json(url: str) -> Any:
+    headers = {"Accept-Language": "en"}
+    async with get_client_session().get(url, headers=headers, ssl=False) as resp:
+        if resp.status != 200:
+            detail = ""
+            try:
+                detail = await resp.text()
+                detail = loads_json(detail).get("detail", detail)
+            except Exception:
+                pass
+            raise Exception(f"下载 {url} 失败: {resp.status} {detail}")
+        return loads_json(await resp.read())
 
 
 def remove_folder(folder_path) -> None:

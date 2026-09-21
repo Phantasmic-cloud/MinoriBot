@@ -1,0 +1,1 @@
+from .asset import RegionMasterDataCollection, RegionRipAssetManger, live2d_voice_path

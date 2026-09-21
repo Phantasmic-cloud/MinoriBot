@@ -9,6 +9,7 @@ from PIL import Image
 
 from src.llm import ChatSession
 from src.utils import *
+from .autochat import chat_gwl
 
 config = Config("chat.sticker")
 logger = get_logger("chat")
@@ -218,7 +219,7 @@ async def generate_caption(img_path: str):
 # ======================= 指令处理 ======================= #
 
 sticker_upload = CmdHandler(["/sticker upload", "/stku", "/表情包上传"], logger)
-sticker_upload.check_cdrate(cd)
+sticker_upload.check_cdrate(cd).check_wblist(chat_gwl)
 
 
 @sticker_upload.handle()
@@ -246,7 +247,7 @@ async def _(ctx: HandlerContext):
 
 
 sticker_del = CmdHandler(["/sticker del", "/stk del", "/表情包删除"], logger)
-sticker_del.check_cdrate(cd)
+sticker_del.check_cdrate(cd).check_wblist(chat_gwl)
 
 
 @sticker_del.handle()
@@ -260,7 +261,7 @@ async def _(ctx: HandlerContext):
 
 
 sticker_view = CmdHandler(["/sticker", "/表情包", "/stk"], logger)
-sticker_view.check_cdrate(cd)
+sticker_view.check_cdrate(cd).check_wblist(chat_gwl)
 
 
 @sticker_view.handle()
@@ -278,7 +279,7 @@ async def _(ctx: HandlerContext):
 
 
 sticker_all = CmdHandler(["/all sticker", "/all stk", "/所有表情包"], logger)
-sticker_all.check_cdrate(cd)
+sticker_all.check_cdrate(cd).check_wblist(chat_gwl)
 
 
 @sticker_all.handle()

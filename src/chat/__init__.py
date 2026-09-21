@@ -11,6 +11,7 @@ from src.llm import ChatSession, api_provider_mgr, get_model_preset, translate_t
 from src.utils import *
 from .autochat import *
 from .sticker import *
+from .voice import *
 
 config = Config("chat.chat")
 logger = get_logger("chat")
