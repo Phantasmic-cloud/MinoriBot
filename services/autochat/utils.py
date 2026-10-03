@@ -280,6 +280,14 @@ def get_readable_datetime(t: datetime | float | int, show_original_time=True, us
         text = f"{t.strftime('%Y-%m-%d %H:%M:%S')} ({text})"
     return text
 
+def get_short_time(t: datetime | float | int) -> str:
+    """
+    获取纯相对时间描述，如 "8秒前"、"3分钟前"、"2小时12分钟前"
+    顶栏已给绝对时间，正文里只需相对时间，省 token
+    """
+    return get_readable_datetime(t, show_original_time=False)
+
+
 def get_readable_timedelta(delta: timedelta, precision: str = 'm', use_en_unit=False) -> str:
     """
     将时间段转换为可读字符串
