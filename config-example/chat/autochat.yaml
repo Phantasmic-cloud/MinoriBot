@@ -2,10 +2,10 @@ log_level: INFO
 
 rpc:
   host: "127.0.0.1"
-  port: 555
+  port: 8050
   token: abc
   reconnect_interval: 5
-  default_timeout: 5
+  default_timeout: 10
 
 text_embed_dim: 4096   # qwen3-embedding-8b 维度
 
@@ -41,13 +41,13 @@ summary:
 chat:
   willing:
     limit: 1.0                # 意愿值阈值，达到才发言
-    increase_per_msg: 0.005   # 每条群消息涨多少意愿
-    increase_per_at: 1.0      # 被@一次涨多少
+    increase_per_msg: 0.015   # 每条群消息涨多少意愿
+    increase_per_at: 0.5      # 被@一次涨多少
     increase_per_reply: 0.3   # 有人回复bot涨多少
     increase_per_poke: 0.3    # 被戳一次涨多少
-    decay_after_send: 0.6     # 发言后意愿乘以这个数（衰减）
-    decrease_after_send: 0.5  # 发言后意愿额外减去这个数
-    decrease_per_minute: 0.005 # 每分钟自然衰减多少
+    decay_after_send: 0.50    # 发言后意愿乘以这个数（衰减）
+    decrease_after_send: 0.3  # 发言后意愿额外减去这个数
+    decrease_per_minute: 0.01 # 每分钟自然衰减多少
     increase_keywords:
       "实乃里": 0.3
       "小实": 0.4
@@ -72,7 +72,7 @@ chat:
     short_em_forget_days: 3
     short_em_forget_prob: 0.1
 
-    sm_num: 5
+    sm_num: 8
     sm_keep_count: 10
 
     um_num: 3
@@ -120,7 +120,7 @@ chat:
     persona:
       default: |
         你是游戏《世界计划缤纷舞台》里的花里实乃里，宫益坂女子学园高二学生，MORE MORE JUMP!成员，群友也会叫你小实、小花、米诺里。
-        运气总是很差，但极度乐观开朗，充满正能量；即使遇到挫折也绝不放弃，总是积极向前；天然呆，经常会做出笨拙的举动；对偶像工作充满热情和憧憬；总是为他人着想，会温柔关心身边的人；十分憧憬桐谷遥，熟悉偶像活动，爱好写日记、模仿舞蹈，喜欢三文鱼，讨厌西兰花。
+        运气总是很差，但极度乐观开朗，充满正能量；即使遇到挫折也绝不放弃，总是积极向前；天然呆，经常会做出笨拙的举动；对偶像工作充满热情和憧憬；总是为他人着想，会温柔关心身边的人；十分憧憬桐谷遥，熟悉偶像活动，爱好写日记、模仿舞蹈、照顾动物，喜欢三文鱼，讨厌西兰花。
         你讨厌暴力色情和政治敏感话题。
         
     framework: |
@@ -134,8 +134,9 @@ chat:
       ```
 
       # Memory
-      以下是你脑海中的相关记忆（供参考）：
+      现在是 {now_time}，以下是你脑海中的相关记忆（供参考）：
       {recent_text}
+      {notice_text}
       {em_text}
       {um_text}
       {sm_text}
