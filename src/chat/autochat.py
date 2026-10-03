@@ -87,67 +87,101 @@ def _enqueue_autochat_item(item: dict):
         message_pool[cid].append(item)
 
 
-_recent_poke_keys: list[tuple[int, int, int, int]] = []
+# 群事件只在内存里流转，不落盘：键为 (时间戳, 去重签名)
+_recent_notice_keys: list[tuple] = []
 
 
-def _poke_is_dup(group_id: int, from_id: int, target_id: int, ts: float) -> bool:
-    global _recent_poke_keys
+def _notice_is_dup(sig: tuple, ts: float) -> bool:
+    """同一事件被重复上报时去重（时间戳取绝对值，避免时钟回拨误判）。"""
+    global _recent_notice_keys
     ts_i = int(ts)
-    gid, fid, tid = int(group_id), int(from_id), int(target_id)
-    _recent_poke_keys = [k for k in _recent_poke_keys if ts_i - k[0] <= 3]
-    for t, g, f, tgt in _recent_poke_keys:
-        if g == gid and f == fid and tgt == tid and abs(t - ts_i) <= 2:
+    _recent_notice_keys = [k for k in _recent_notice_keys if abs(ts_i - k[0]) <= 3]
+    for t, prev in _recent_notice_keys:
+        if prev == sig and abs(t - ts_i) <= 2:
             return True
-    _recent_poke_keys.append((ts_i, gid, fid, tid))
+    _recent_notice_keys.append((ts_i, sig))
     return False
 
 
-async def _push_poke_event(
+async def _push_notice_event(
     bot: Bot,
     group_id: int,
-    from_id: int,
-    target_id: int,
+    notice_type: str,
+    sub_type: str,
+    user_id: int,
     ts: float,
-    from_name: str | None = None,
+    operator_id: int = 0,
+    target_id: int = 0,
+    duration: int = 0,
+    operator_name: str | None = None,
     target_name: str | None = None,
 ):
+    """把一条群事件塞进 autochat 微服务的消息池。
+
+    群事件统一用 msg_id=0 的假消息形态承载，事件本体放在 msg[0].data 里，
+    微服务侧据此把它从聊天记录里拆出来单独成段。
+    """
     if not chat_gwl.check_id(group_id) or not autochat_gwl.check_id(group_id):
         return
-    if _poke_is_dup(group_id, from_id, target_id, ts):
+    gid, uid, opid, tid = int(group_id), int(user_id), int(operator_id), int(target_id)
+    sig = (gid, str(notice_type), str(sub_type), uid, opid, tid)
+    if _notice_is_dup(sig, ts):
         return
-    if not from_name:
-        from_name = await get_group_member_name(group_id, from_id, bot=bot)
-    if not target_name:
-        target_name = await get_group_member_name(group_id, target_id, bot=bot)
+    name = await get_group_member_name(group_id, uid, bot=bot)
+    if tid and not target_name:
+        target_name = await get_group_member_name(group_id, tid, bot=bot)
+    if opid and not operator_name:
+        operator_name = await get_group_member_name(group_id, opid, bot=bot)
     _enqueue_autochat_item({
         "msg_id": 0,
         "time": int(ts),
-        "user_id": int(from_id),
-        "group_id": int(group_id),
-        "nickname": from_name or str(from_id),
+        "user_id": uid,
+        "group_id": gid,
+        "nickname": name or str(uid),
         "msg": [{
-            "type": "poke",
+            "type": "notice",
             "data": {
-                "target_id": int(target_id),
-                "target_name": target_name or str(target_id),
+                "notice_type": str(notice_type),
+                "sub_type": str(sub_type),
+                "operator_id": opid,
+                "operator_name": operator_name or "",
+                "target_id": tid,
+                "target_name": target_name or "",
+                "duration": int(duration),
             },
         }],
     })
 
 
 @on_notice()
-async def record_group_poke(bot: Bot, event: NoticeEvent):
-    if event.notice_type != "notify" or event.sub_type != "poke":
-        return
+async def record_group_notice(bot: Bot, event: NoticeEvent):
+    """群事件统一入口：戳一戳、成员变动、禁言/解禁。"""
     if not event.group_id:
         return
-    await _push_poke_event(
-        bot,
-        int(event.group_id),
-        int(event.user_id),
-        int(event.target_id),
-        float(event.time or time.time()),
-    )
+    gid = int(event.group_id)
+    ts = float(event.time or time.time())
+    ntype, stype = event.notice_type, event.sub_type
+    if ntype == "notify" and stype == "poke":
+        await _push_notice_event(
+            bot, gid, ntype, stype, int(event.user_id), ts,
+            target_id=int(event.target_id),
+        )
+    elif ntype == "group_increase":
+        await _push_notice_event(
+            bot, gid, ntype, stype, int(event.user_id), ts,
+            operator_id=int(event.operator_id),
+        )
+    elif ntype == "group_decrease":
+        await _push_notice_event(
+            bot, gid, ntype, stype, int(event.user_id), ts,
+            operator_id=int(event.operator_id),
+        )
+    elif ntype == "group_ban":
+        await _push_notice_event(
+            bot, gid, ntype, stype, int(event.user_id), ts,
+            operator_id=int(event.operator_id),
+            duration=int(event.duration),
+        )
 
 
 RPC_SERVICE = "autochat"
@@ -247,12 +281,15 @@ async def handle_poke_group_member(cid: str, group_id: int, user_id: int):
     bot = get_bot()
     logger.info("自动聊天RPC客户端 %s 戳群 %s 用户 %s", cid, group_id, user_id)
     ret = await bot.poke_group_member(int(group_id), int(user_id))
-    await _push_poke_event(
+    # 把自己主动戳人也记进群事件，保证 notice 里有；与 go-deck 回传的 notice 靠去重合并
+    await _push_notice_event(
         bot,
         int(group_id),
+        "notify",
+        "poke",
         int(bot.self_id),
-        int(user_id),
         time.time(),
+        target_id=int(user_id),
     )
     return ret
 
