@@ -780,47 +780,92 @@ def json_msg_to_readable_text(data: dict):
         except:
             return "[转发消息]"
 
-def _is_poke_msg(msg: Message) -> bool:
-    return any(seg.get('type') == 'poke' for seg in msg.msg)
+def _is_notice_msg(msg: Message) -> bool:
+    return any(seg.get('type') == 'notice' for seg in msg.msg)
 
 
-def _poke_target_id(msg: Message) -> int:
+def _notice_data(msg: Message) -> dict:
     for seg in msg.msg:
-        if seg.get('type') == 'poke':
-            try:
-                return int(seg.get('data', {}).get('target_id') or 0)
-            except (TypeError, ValueError):
-                return 0
-    return 0
+        if seg.get('type') == 'notice':
+            return seg.get('data') or {}
+    return {}
 
 
-def _poke_key(msg: Message) -> tuple[int, int, int]:
+def _notice_key(msg: Message) -> tuple:
+    """去重签名：不含时间戳，靠 (群, 类型, 涉及的人) 唯一标识一条事件。"""
     ts = int(msg.time.timestamp()) if isinstance(msg.time, datetime) else int(msg.time)
-    return (ts, int(msg.user_id), _poke_target_id(msg))
+    d = _notice_data(msg)
+    return (
+        ts,
+        int(msg.group_id),
+        str(d.get('notice_type') or ''),
+        str(d.get('sub_type') or ''),
+        int(msg.user_id or 0),
+        int(d.get('operator_id') or 0),
+        int(d.get('target_id') or 0),
+    )
 
 
-group_pokes: dict[int, list[Message]] = {}
-POKE_KEEP = 10
+group_notices: dict[int, list[Message]] = {}
+NOTICE_KEEP = 10
 
 
-def remember_poke(msg: Message):
-    lst = group_pokes.setdefault(msg.group_id, [])
-    key = _poke_key(msg)
-    if any(_poke_key(p) == key for p in lst):
+def remember_notice(msg: Message):
+    lst = group_notices.setdefault(msg.group_id, [])
+    key = _notice_key(msg)
+    if any(_notice_key(p) == key for p in lst):
         return
     lst.append(msg)
-    del lst[:-POKE_KEEP]
+    del lst[:-NOTICE_KEEP]
 
 
-def collect_recent_pokes(group_id: int, since: datetime) -> list[Message]:
-    return [p for p in group_pokes.get(group_id, []) if p.time >= since]
+def collect_recent_notices(group_id: int, since: datetime) -> list[Message]:
+    return [n for n in group_notices.get(group_id, []) if n.time >= since]
 
 
-def _poke_person_label(uid: int, name: str, self_id: int) -> str:
+def _person_label(uid: int, name: str, self_id: int) -> str:
     if int(uid) == int(self_id):
         return "你"
     label = name or str(uid)
     return f"{label}({uid})"
+
+
+def _ban_desc(duration: int) -> str:
+    """禁言时长转成人类可读描述。duration 单位为秒。"""
+    try:
+        sec = int(duration or 0)
+    except (TypeError, ValueError):
+        sec = 0
+    if sec <= 0:
+        return "被永久禁言"
+    if sec % 86400 == 0:
+        return f"被禁言{sec // 86400}天"
+    if sec % 3600 == 0:
+        return f"被禁言{sec // 3600}小时"
+    if sec % 60 == 0:
+        return f"被禁言{sec // 60}分钟"
+    return f"被禁言{sec}秒"
+
+
+def format_notice(msg: Message, self_id: int) -> str:
+    """把一条群事件渲染成一行自然语言，供 {notice_text} 注入。"""
+    d = _notice_data(msg)
+    ntype = str(d.get('notice_type') or '')
+    stype = str(d.get('sub_type') or '')
+    who = _person_label(msg.user_id, msg.nickname, self_id)
+    if ntype == 'notify' and stype == 'poke':
+        tid = int(d.get('target_id') or 0)
+        tname = str(d.get('target_name') or '') or str(tid)
+        return f"{who} 戳了戳 {_person_label(tid, tname, self_id)}"
+    if ntype == 'group_increase':
+        return f"{who} 加入群聊"
+    if ntype == 'group_decrease':
+        return f"{who} 被踢出群聊" if stype == 'kick' else f"{who} 退出群聊"
+    if ntype == 'group_ban':
+        if stype == 'lift_ban':
+            return f"{who} 被解除禁言"
+        return f"{who} {_ban_desc(d.get('duration'))}"
+    return f"{who} 发生了一条群事件"
 
 
 async def format_msgs(
@@ -830,22 +875,24 @@ async def format_msgs(
     emotion_caption_limit: int,
     emotion_caption_prob: float,
     self_id: int = 0,
-) -> str:
+) -> tuple[str, str]:
+    """渲染聊天记录与群事件。
+
+    返回 (消息文本, 群事件文本) 两路输出：群事件单独成段，不混进 {recent_text}。
+    """
     msgs = sorted(msgs, key=lambda m: m.time, reverse=True)
     texts = []
+    notice_texts = []
     captioned_images = 0
     captioned_emotions = 0
     for msg in msgs:
-        text = f"{get_readable_datetime(msg.time)} [{msg.msg_id}] {msg.nickname}({msg.user_id}):\n"
+        if _is_notice_msg(msg):
+            notice_texts.append(f"({get_short_time(msg.time)}) {format_notice(msg, self_id)}")
+            continue
+        text = f"({get_short_time(msg.time)}) [{msg.msg_id}] {msg.nickname}({msg.user_id}):\n"
         for seg in msg.msg:
             stype, sdata = seg['type'], seg['data']
             match stype:
-                case "poke":
-                    from_label = _poke_person_label(msg.user_id, msg.nickname, self_id)
-                    tid = int(sdata.get('target_id') or 0)
-                    tname = sdata.get('target_name') or str(tid)
-                    to_label = _poke_person_label(tid, tname, self_id)
-                    text = f"{get_readable_datetime(msg.time)} {from_label} 戳了戳 {to_label}"
                 case "text":
                     text += sdata['text']
                 case "face":
@@ -878,7 +925,24 @@ async def format_msgs(
                         )
                         captioned_emotions += 1
         texts.append(text.strip())
-    return "\n".join(reversed(texts))
+    return "\n".join(reversed(texts)), "\n".join(reversed(notice_texts))
+
+_CQ_AT_RE = re.compile(r"\[CQ:at,qq=(\d+)(?:,[^\]]*)?\]")
+_CQ_REPLY_RE = re.compile(r"\[CQ:reply,id=(-?\d+)(?:,[^\]]*)?\]")
+
+
+def _cq_to_readable(text: str) -> str:
+    """把自身记忆里的 CQ 码还原成 {recent_text} 的写法。
+
+    存储时为了真正发出去会转成 CQ 码，但注入 prompt 时应统一成
+    [@qqid] / [reply=msgid]，否则和 {recent_text} 的风格不一致。
+    """
+    if not text:
+        return text
+    text = _CQ_AT_RE.sub(lambda m: f"[@{m.group(1)}]", text)
+    text = _CQ_REPLY_RE.sub(lambda m: f"[reply={m.group(1)}]", text)
+    return text
+
 
 def get_plain_text(msg: Message) -> str:
     ret = ""
@@ -918,16 +982,21 @@ async def chat(msg: Message):
     self_id = int(_self_infos[msg.group_id]['self_id'])
     self_name = _self_infos[msg.group_id]['nickname']
 
-    is_poke = _is_poke_msg(msg)
-    poke_target = _poke_target_id(msg) if is_poke else 0
-    if is_poke:
-        remember_poke(msg)
+    is_notice = _is_notice_msg(msg)
+    # 只有「自己被戳」才算需要回应的事件；入群/退群/禁言只入时间线，不触发回复
+    notice_d = _notice_data(msg)
+    is_notice_poke = is_notice and str(notice_d.get('notice_type') or '') == 'notify' and str(notice_d.get('sub_type') or '') == 'poke'
+    poke_target = int(notice_d.get('target_id') or 0) if is_notice_poke else 0
+    if is_notice:
+        remember_notice(msg)
 
     if msg.user_id == self_id:  # 自己发的消息/自己戳人不触发
         return
-    if not is_poke and get_plain_text(msg).startswith("/"):  # 命令消息不触发
+    if not is_notice and get_plain_text(msg).startswith("/"):  # 命令消息不触发
         return
-    if is_poke and poke_target != self_id:  # 别人戳别人，只入时间线
+    if is_notice_poke and poke_target != self_id:  # 别人戳别人，只入时间线
+        return
+    if is_notice and not is_notice_poke:  # 其它群事件只入时间线，不触发
         return
 
     status = GroupStatus.load(msg.group_id)
@@ -935,7 +1004,7 @@ async def chat(msg: Message):
     if status.last_reply_time and msg.time.timestamp() <= status.last_reply_time:
         return
     
-    if is_poke:
+    if is_notice_poke:
         info(f"{msg.group_id} 的戳一戳 {msg.nickname}({msg.user_id}) -> {poke_target}")
     else:
         info(f"{msg.group_id} 的新消息 {msg.msg_id} {msg.nickname}({msg.user_id}): {get_plain_text(msg)}")
@@ -948,7 +1017,7 @@ async def chat(msg: Message):
         if status.last_check_willing_time:
             time_passed = time.time() - status.last_check_willing_time
             delta -= min(config.get('chat.willing.decrease_per_minute') * time_passed / 60.0, status.willingness)
-        if is_poke:
+        if is_notice_poke:
             delta += config.get('chat.willing.increase_per_poke')
         else:
             # 每条消息增加
@@ -996,23 +1065,33 @@ async def chat(msg: Message):
 
     # ---------------- 消息处理 ---------------- #
     try:
-        recent_msgs = await rpc_get_group_history_msg(msg.group_id, config.get('chat.history_msg_num'))
+        history_num = config.get('chat.history_msg_num')
+        # 多拉一倍：{recent_text} 只放真消息，群事件拆到 {notice_text} 后不该占 recent 名额
+        recent_msgs = await rpc_get_group_history_msg(msg.group_id, history_num * 2)
         # 隐藏所有命令消息
         recent_msgs = [m for m in recent_msgs if not get_plain_text(m).startswith("/")]
         # 如果历史消息中没有当前消息，则添加
-        if not is_poke and msg.msg_id and not any(m.msg_id == msg.msg_id for m in recent_msgs):
+        if not is_notice and msg.msg_id and not any(m.msg_id == msg.msg_id for m in recent_msgs):
             recent_msgs.append(msg)
-        since = min((m.time for m in recent_msgs), default=msg.time)
-        poke_keys = {_poke_key(m) for m in recent_msgs if _is_poke_msg(m)}
-        for poke in collect_recent_pokes(msg.group_id, since):
-            key = _poke_key(poke)
-            if key not in poke_keys:
-                recent_msgs.append(poke)
-                poke_keys.add(key)
-        info(f"获取最近共 {len(recent_msgs)} 条有效聊天记录")
+        # 群事件单独收集：先看已入内存的，再看历史里带的
+        notice_msgs = [m for m in recent_msgs if _is_notice_msg(m)]
+        real_msgs = [m for m in recent_msgs if not _is_notice_msg(m)]
+        # {recent_text} 只保留真消息。历史接口按时间倒序返回，当前消息可能追加在末尾，
+        # 必须先按时间倒序排再截断，否则会把最新那条切掉
+        real_msgs.sort(key=lambda m: m.time, reverse=True)
+        real_msgs = real_msgs[:history_num]
+        # 群事件时间线以 {recent_text} 的窗口为准
+        since = min((m.time for m in real_msgs), default=msg.time)
+        notice_keys = {_notice_key(m) for m in notice_msgs}
+        for notice in collect_recent_notices(msg.group_id, since):
+            key = _notice_key(notice)
+            if key not in notice_keys:
+                notice_msgs.append(notice)
+                notice_keys.add(key)
+        info(f"获取最近共 {len(real_msgs)} 条有效聊天记录、{len(notice_msgs)} 条群事件")
 
-        recent_text = await format_msgs(
-            recent_msgs,
+        recent_text, notice_lines = await format_msgs(
+            real_msgs + notice_msgs,
             image_caption_limit=config.get('image_caption.image_limit'),
             image_caption_prob=config.get('image_caption.image_prob'),
             emotion_caption_limit=config.get('image_caption.emotion_limit'),
@@ -1025,7 +1104,7 @@ async def chat(msg: Message):
             return
 
         last_long_msg = None
-        for m in reversed(recent_msgs):
+        for m in reversed(real_msgs):
             msg_text = get_plain_text(m)
             if len(msg_text) >= 4:
                 last_long_msg = msg_text
@@ -1059,7 +1138,7 @@ async def chat(msg: Message):
                 em_text += "可能与你当前聊天内容相关的记忆事件:\n"
                 em_text += "```\n"
                 for em in short_ems + long_ems:
-                    em_text += f"{get_readable_datetime(datetime.fromtimestamp(em.created_at))}: {em.text}\n"
+                    em_text += f"({get_short_time(em.created_at)}) {em.text}\n"
                 em_text += "```\n"
 
         # 获取自身回复记忆
@@ -1069,7 +1148,7 @@ async def chat(msg: Message):
             sms: list[SelfMemory] = mem.sm_get()[-sm_num:] if sm_num > 0 else []
             info(f"获取自身记忆共 {len(sms)} 条: {[s.id for s in sms]}")
             if sms:
-                sm_text += "你自己过去的回复记录供参考:\n"
+                sm_text += "你自己过去的回复记录供参考（(??前) [msgid]: 消息）:\n"
                 sm_text += "```\n"
                 for sm in sms:
                     if sm.sticker:
@@ -1077,8 +1156,9 @@ async def chat(msg: Message):
                     elif sm.tts:
                         body = f"[语音: {sm.tts}]"
                     else:
-                        body = sm.text
-                    sm_text += f"{get_readable_datetime(sm.time)} [{sm.id}]: {body}\n"
+                        # 存的是转成 CQ 码的文本，注入时还原成 {recent_text} 的写法
+                        body = _cq_to_readable(sm.text)
+                    sm_text += f"({get_short_time(sm.time)}) [{sm.id}]: {body}\n"
                 sm_text += "```\n"
 
         # 获取用户记忆
@@ -1087,12 +1167,12 @@ async def chat(msg: Message):
         top_user_ids = []
         if um_num > 0:
             user_msg_counts = {}
-            for m in recent_msgs:
+            for m in real_msgs:
                 user_msg_counts[m.user_id] = user_msg_counts.get(m.user_id, 0) + 1
             top_users = sorted(user_msg_counts.items(), key=lambda x: x[1], reverse=True)
             candidate_uids = [uid for uid, _ in top_users]
             # 包含消息中提到名称的用户（更优先）
-            full_msg = "".join(get_plain_text(m) for m in recent_msgs)
+            full_msg = "".join(get_plain_text(m) for m in real_msgs)
             mentioned_uids = mem.um_query_uid_by_name_in_message(full_msg)
             for uid in mentioned_uids:
                 if uid not in candidate_uids:
@@ -1110,7 +1190,7 @@ async def chat(msg: Message):
                     if um.recent_events:
                         u_info += "  - 最近事件:\n"
                         for t, txt in um.recent_events:
-                            u_info += f"    [{get_readable_datetime(datetime.fromtimestamp(t))}]: {txt}\n"
+                            u_info += f"    ({get_short_time(t)}): {txt}\n"
                     ums_content.append(u_info)
             if ums_content:
                 um_text += "你对聊天中的部分用户的记忆:\n"
@@ -1123,8 +1203,14 @@ async def chat(msg: Message):
     # ---------------- 请求LLM生成回复 ---------------- #
 
     try:
+        # 群事件单独成段，无事件时留空
+        notice_text = ""
+        if notice_lines:
+            notice_text += "以下是最近的群事件：\n"
+            notice_text += "```\n" + notice_lines + "\n```\n"
+
         recent_text = f"""
-以下是最近的聊天记录:
+以下是最近的聊天记录（(??前) [msgid] 当前昵称(qqid): \n消息）:
 ```
 {recent_text}
 ```
@@ -1140,7 +1226,9 @@ async def chat(msg: Message):
             self_id=self_id,
             self_name=self_name,
             persona=persona,
+            now_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             recent_text=recent_text,
+            notice_text=notice_text,
             em_text=em_text,
             sm_text=sm_text,
             um_text=um_text,
@@ -1204,12 +1292,12 @@ async def chat(msg: Message):
             if at_match := re.search(r"\[@(\d+)\]", text):
                 at_id = int(at_match.group(1))
                 text = text.replace(at_match.group(0), "")
-                if any(m.user_id == at_id for m in recent_msgs):
+                if any(m.user_id == at_id for m in real_msgs):
                     text = f"[CQ:at,qq={at_id}]" + text
             if reply_match := re.search(r"\[reply=(-?\d+)\]", text):
                 reply_id = int(reply_match.group(1))
                 text = text.replace(reply_match.group(0), "")
-                if any(int(m.msg_id) == reply_id for m in recent_msgs):
+                if any(int(m.msg_id) == reply_id for m in real_msgs):
                     text = f"[CQ:reply,id={reply_id}]" + text
             text = truncate(text, config.get('chat.reply_max_length'))
             info(f"自动聊天生成回复{index}: {text} at_id={at_id} reply_id={reply_id}")
@@ -1252,7 +1340,7 @@ async def chat(msg: Message):
                     warning(f"戳一戳失败 user_id={uid}: {get_exc_desc(e)}")
 
         async def process_react(msg_id: int, emoji_id: str):
-            if not any(int(m.msg_id) == msg_id for m in recent_msgs):
+            if not any(int(m.msg_id) == msg_id for m in real_msgs):
                 info(f"贴表情跳过，消息不在最近记录中: msg_id={msg_id}")
                 return
             try:
@@ -1411,9 +1499,9 @@ async def chat(msg: Message):
                     new_names = []
                     if update.get('new_name'):
                         new_names.append(update.get('new_name'))
-                    for msg in reversed(recent_msgs):
-                        if msg.user_id == uid:
-                            new_names.append(msg.nickname)
+                    for m in reversed(real_msgs):
+                        if m.user_id == uid:
+                            new_names.append(m.nickname)
                             break
                     mem.um_update(
                         user_id=uid,
