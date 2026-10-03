@@ -837,34 +837,44 @@ def _ban_desc(duration: int) -> str:
     except (TypeError, ValueError):
         sec = 0
     if sec <= 0:
-        return "被永久禁言"
+        return "永久禁言"
     if sec % 86400 == 0:
-        return f"被禁言{sec // 86400}天"
+        return f"禁言{sec // 86400}天"
     if sec % 3600 == 0:
-        return f"被禁言{sec // 3600}小时"
+        return f"禁言{sec // 3600}小时"
     if sec % 60 == 0:
-        return f"被禁言{sec // 60}分钟"
-    return f"被禁言{sec}秒"
+        return f"禁言{sec // 60}分钟"
+    return f"禁言{sec}秒"
 
 
 def format_notice(msg: Message, self_id: int) -> str:
-    """把一条群事件渲染成一行自然语言，供 {notice_text} 注入。"""
+    """把一条群事件渲染成一行自然语言，供 {notice_text} 注入。
+
+    事件里 user_id 是当事人、operator_id 是操作者（禁言者/邀请者/踢人者），
+    target_id 只在 poke 时有值，表示被戳的那个。
+    """
     d = _notice_data(msg)
     ntype = str(d.get('notice_type') or '')
     stype = str(d.get('sub_type') or '')
     who = _person_label(msg.user_id, msg.nickname, self_id)
+    op = _person_label(d.get('operator_id') or 0, str(d.get('operator_name') or ''), self_id)
     if ntype == 'notify' and stype == 'poke':
         tid = int(d.get('target_id') or 0)
         tname = str(d.get('target_name') or '') or str(tid)
         return f"{who} 戳了戳 {_person_label(tid, tname, self_id)}"
-    if ntype == 'group_increase':
-        return f"{who} 加入群聊"
-    if ntype == 'group_decrease':
-        return f"{who} 被踢出群聊" if stype == 'kick' else f"{who} 退出群聊"
     if ntype == 'group_ban':
         if stype == 'lift_ban':
-            return f"{who} 被解除禁言"
-        return f"{who} {_ban_desc(d.get('duration'))}"
+            return f"{who} 被 {op} 解除禁言"
+        return f"{who} 被 {op} {_ban_desc(d.get('duration'))}"
+    if ntype == 'group_increase':
+        # operator_id 为 0（或与当事人相同）表示自己主动进群，否则是被邀请
+        if int(d.get('operator_id') or 0) not in (0, int(msg.user_id or 0)):
+            return f"{op} 邀请 {who} 加入群聊"
+        return f"{who} 加入群聊"
+    if ntype == 'group_decrease':
+        if stype == 'kick' and int(d.get('operator_id') or 0):
+            return f"{who} 被 {op} 踢出群聊"
+        return f"{who} 退出群聊"
     return f"{who} 发生了一条群事件"
 
 
@@ -904,7 +914,9 @@ async def format_msgs(
                 case "file":
                     text += "[文件]"
                 case "at":
-                    text += f"[@{sdata['qq']}]"
+                    qq = str(sdata.get('qq') or '')
+                    # @全体成员在注入侧展开成中文，LLM 侧只允许输出数字 qqid
+                    text += "[@全体成员]" if qq == 'all' else f"[@{qq}]"
                 case "reply":
                     text += f"[reply={sdata['id']}]"
                 case "forward":
@@ -928,7 +940,12 @@ async def format_msgs(
     return "\n".join(reversed(texts)), "\n".join(reversed(notice_texts))
 
 _CQ_AT_RE = re.compile(r"\[CQ:at,qq=(\d+)(?:,[^\]]*)?\]")
+_CQ_AT_ALL_RE = re.compile(r"\[CQ:at,qq=all(?:,[^\]]*)?\]")
 _CQ_REPLY_RE = re.compile(r"\[CQ:reply,id=(-?\d+)(?:,[^\]]*)?\]")
+
+# LLM 输出的标记。at 只认数字 qqid：[@全体成员] 这类非数字写法按普通文字原样发出。
+_AT_TOKEN_RE = re.compile(r"\[@(\d+)\]")
+_REPLY_TOKEN_RE = re.compile(r"\[reply=(-?\d+)\]")
 
 
 def _cq_to_readable(text: str) -> str:
@@ -939,6 +956,7 @@ def _cq_to_readable(text: str) -> str:
     """
     if not text:
         return text
+    text = _CQ_AT_ALL_RE.sub("[@全体成员]", text)
     text = _CQ_AT_RE.sub(lambda m: f"[@{m.group(1)}]", text)
     text = _CQ_REPLY_RE.sub(lambda m: f"[reply={m.group(1)}]", text)
     return text
@@ -1140,12 +1158,12 @@ async def chat(msg: Message):
                 for em in short_ems + long_ems:
                     em_text += f"({get_short_time(em.created_at)}) {em.text}\n"
                 em_text += "```\n"
-
         # 获取自身回复记忆
         sm_num = config.get('chat.mem.sm_num')
         sm_text = ""
+        sms: list[SelfMemory] = []
         if sm_num > 0:
-            sms: list[SelfMemory] = mem.sm_get()[-sm_num:] if sm_num > 0 else []
+            sms = mem.sm_get()[-sm_num:]
             info(f"获取自身记忆共 {len(sms)} 条: {[s.id for s in sms]}")
             if sms:
                 sm_text += "你自己过去的回复记录供参考（(??前) [msgid]: 消息）:\n"
@@ -1160,6 +1178,21 @@ async def chat(msg: Message):
                         body = _cq_to_readable(sm.text)
                     sm_text += f"({get_short_time(sm.time)}) [{sm.id}]: {body}\n"
                 sm_text += "```\n"
+
+        # LLM 输出标记的有效范围。
+        # [reply=id] 认 {recent_text} 与 {sm_text} 出现过的 msgid；
+        # [@qqid] 认 {recent_text} 与 {notice_text} 出现过的人（当事人/操作者/被戳者）。
+        valid_reply_ids: set[int] = {int(m.msg_id) for m in real_msgs}
+        valid_reply_ids.update(int(s.id) for s in sms)
+        valid_at_ids: set[int] = {int(m.user_id) for m in real_msgs}
+        for nm in notice_msgs:
+            nd = _notice_data(nm)
+            for key in ('operator_id', 'target_id'):
+                if int(nd.get(key) or 0):
+                    valid_at_ids.add(int(nd[key]))
+            if int(nm.user_id or 0):
+                valid_at_ids.add(int(nm.user_id))
+
 
         # 获取用户记忆
         um_num = config.get('chat.mem.um_num')
@@ -1288,19 +1321,35 @@ async def chat(msg: Message):
             if not text:
                 info(f"LLM生成的回复{index}为空，放弃发送")
                 return
-            at_id, reply_id = None, None
-            if at_match := re.search(r"\[@(\d+)\]", text):
-                at_id = int(at_match.group(1))
-                text = text.replace(at_match.group(0), "")
-                if any(m.user_id == at_id for m in real_msgs):
-                    text = f"[CQ:at,qq={at_id}]" + text
-            if reply_match := re.search(r"\[reply=(-?\d+)\]", text):
-                reply_id = int(reply_match.group(1))
-                text = text.replace(reply_match.group(0), "")
-                if any(int(m.msg_id) == reply_id for m in real_msgs):
-                    text = f"[CQ:reply,id={reply_id}]" + text
+            # ---- [reply=id]：一条消息最多带一个，且必须放在最前面 ----
+            # 无论 LLM 写在哪、有几个，全部先摘出来；只保留在上下文里出现过的 msgid。
+            reply_ids = re.findall(r"\[reply=(-?\d+)\]", text)
+            text = _REPLY_TOKEN_RE.sub("", text)
+            valid_reply = [r for r in reply_ids if int(r) in valid_reply_ids]
+            reply_id = None
+            if len(valid_reply) == 1:
+                reply_id = int(valid_reply[0])
+                text = f"[CQ:reply,id={reply_id}]" + text
+            # ---- [@qqid]：可多个，各自留在原位置 ----
+            # 判定范围是 {recent_text} 与 {notice_text} 出现过的人；
+            # 不在场的一律删掉，不留裸的 [@xxx] 文本。
+            at_ids: list[int] = []
+            drop_at_ids: list[int] = []
+
+            def _at_sub(m: re.Match) -> str:
+                qid = int(m.group(1))
+                if qid not in valid_at_ids:
+                    drop_at_ids.append(qid)
+                    return ""
+                if qid not in at_ids:
+                    at_ids.append(qid)
+                return f"[CQ:at,qq={qid}]"
+
+            text = _AT_TOKEN_RE.sub(_at_sub, text)
             text = truncate(text, config.get('chat.reply_max_length'))
-            info(f"自动聊天生成回复{index}: {text} at_id={at_id} reply_id={reply_id}")
+            info(f"自动聊天生成回复{index}: {text} "
+                 f"at_id={at_ids} reply_id={reply_id} "
+                 f"丢弃的at={drop_at_ids} 无效reply={sorted(set(reply_ids) - set(valid_reply))}")
 
             send_ret = await rpc_send_group_msg(msg.group_id, text)
             send_msg_id = int(send_ret['message_id'])
