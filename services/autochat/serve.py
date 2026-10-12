@@ -258,13 +258,16 @@ file_db = get_file_db("data/chat/autochat/db.json")
 
 # ================ Sticker搜索 ================= #
 
-# caption向量缓存: list of (sid, text, path, full_emb, emotion_emb)
+# caption向量缓存: list of (sid, path, info, emotion_emb, scene_emb)
 _sticker_cache: list[tuple[int, str, str, np.ndarray, np.ndarray]] = []
 _sticker_cache_mtime: float = 0.0
 _sticker_job: asyncio.Task | None = None
 
 STK_EMB_DB_PATH = "data/chat/autochat/stk_emb_db.json"
 STK_DB_PATH = "data/chat/autochat/sticker_db.json"
+# 向量库结构版本，不是程序期待的样式就整体重建
+# 1 = 旧的 {sid}:[emotion,scene] 全量向量 + e: 前缀存 emotion；2 = e: 前缀存 emotion、s: 前缀存 scene
+STK_EMB_SCHEMA = 2
 
 
 def _sticker_job_running() -> bool:
@@ -290,6 +293,10 @@ def _emb_db_usable(model: str) -> tuple[bool, dict]:
     if stored != model:
         info(f"Embedding模型已变更({stored} -> {model})，清空向量库")
         return False, {}
+    schema = raw.get('schema')
+    if schema != STK_EMB_SCHEMA:
+        info(f"向量库结构已变更({schema} -> {STK_EMB_SCHEMA})，清空向量库")
+        return False, {}
     emb = raw.get('embeddings') or {}
     return True, emb if isinstance(emb, dict) else {}
 
@@ -298,56 +305,95 @@ def _save_emb_db(model: str, embeddings: dict):
     os.makedirs(os.path.dirname(STK_EMB_DB_PATH), exist_ok=True)
     tmp_path = STK_EMB_DB_PATH + '.tmp'
     with open(tmp_path, 'w', encoding='utf-8') as f:
-        json.dump({'emb_model': model, 'embeddings': embeddings}, f, ensure_ascii=False)
+        json.dump({'emb_model': model, 'schema': STK_EMB_SCHEMA, 'embeddings': embeddings}, f, ensure_ascii=False)
     os.replace(tmp_path, STK_EMB_DB_PATH)
 
 
-def _collect_sid_texts() -> tuple[list[tuple[int, str, str]], float]:
+def _collect_sid_texts() -> tuple[list[tuple[int, str, str, str, str]], float]:
+    """从 sticker_db 收集全部表情包条目 (sid, emotion, scene, path, info_text) 与文件 mtime。"""
     mtime = os.path.getmtime(STK_DB_PATH)
     with open(STK_DB_PATH, 'r', encoding='utf-8') as f:
         db = json.load(f)
     stickers = db.get('stickers', {})
-    sid_texts: list[tuple[int, str, str]] = []
+    sid_texts: list[tuple[int, str, str, str, str]] = []
     for sid_str, s in stickers.items():
         sid = int(sid_str)
         path = os.path.abspath(s.get('path', ''))
+        info_text = str(s.get('info') or '')
         captions = s.get('caption', [])
         if isinstance(captions, str):
             captions = [{'emotion': '', 'scene': captions}]
         for c in captions:
-            emotion = c.get('emotion', '')
-            scene = c.get('scene', '')
+            emotion = str(c.get('emotion') or '')
+            scene = str(c.get('scene') or '')
             if emotion or scene:
-                text = f"{emotion},{scene}" if emotion else scene
-                sid_texts.append((sid, text, path))
+                sid_texts.append((sid, emotion, scene, path, info_text))
     return sid_texts, mtime
 
 
-def _apply_sticker_cache(sid_texts: list[tuple[int, str, str]], emb_db: dict, mtime: float):
+def _sticker_emb_keys(sid: int, emotion: str, scene: str) -> tuple[str, str]:
+    """一条 caption 在向量库里对应的 emotion / scene 两个 key。"""
+    k = f"{sid}:{emotion},{scene}"
+    return f"e:{k}", f"s:{k}"
+
+
+def _used_emb_keys(sid_texts: list[tuple[int, str, str, str, str]]) -> set[str]:
+    used: set[str] = set()
+    for sid, emotion, scene, _, _ in sid_texts:
+        used.update(_sticker_emb_keys(sid, emotion, scene))
+    return used
+
+
+def _stale_emb_keys(sid_texts: list[tuple[int, str, str, str, str]], emb_db: dict) -> set[str]:
+    """stk_emb_db 里已不被 sticker_db 引用的残留 key（表情包被主程序删除后留下）。"""
+    return set(emb_db) - _used_emb_keys(sid_texts)
+
+
+def _drop_sticker_cache_sid(sid: int, path: str = ""):
+    """从内存缓存里剔除已失效的表情包，避免反复命中发不出去的结果。"""
+    global _sticker_cache
+    before = len(_sticker_cache)
+    _sticker_cache = [c for c in _sticker_cache if c[0] != sid]
+    if len(_sticker_cache) != before:
+        warning(f"表情包已失效，从缓存剔除: sid={sid} path={path}")
+
+
+def _apply_sticker_cache(sid_texts: list[tuple[int, str, str, str, str]], emb_db: dict, mtime: float):
     global _sticker_cache, _sticker_cache_mtime
     cache = []
-    for sid, text, path in sid_texts:
-        k = f"{sid}:{text}"
-        ek = f"e:{k}"
-        if k in emb_db and ek in emb_db:
+    missing_files = 0
+    for sid, emotion, scene, path, info_text in sid_texts:
+        ek, sk = _sticker_emb_keys(sid, emotion, scene)
+        if ek in emb_db and sk in emb_db:
+            if not os.path.isfile(path):
+                missing_files += 1
+                continue
             cache.append((
-                sid, text, path,
-                np.array(emb_db[k], dtype=np.float32),
+                sid, path, info_text,
                 np.array(emb_db[ek], dtype=np.float32),
+                np.array(emb_db[sk], dtype=np.float32),
             ))
     _sticker_cache = cache
     _sticker_cache_mtime = mtime
+    if missing_files:
+        warning(f"表情包向量缓存里{missing_files}条记录的文件已不存在，已跳过")
 
 
-def _missing_indices(sid_texts: list[tuple[int, str, str]], emb_db: dict) -> list[int]:
-    keys = [f"{sid}:{text}" for sid, text, _ in sid_texts]
-    return [i for i, k in enumerate(keys) if k not in emb_db or f"e:{k}" not in emb_db]
+def _missing_indices(sid_texts: list[tuple[int, str, str, str, str]], emb_db: dict) -> list[int]:
+    missing = []
+    for i, (sid, emotion, scene, _, _) in enumerate(sid_texts):
+        ek, sk = _sticker_emb_keys(sid, emotion, scene)
+        if ek not in emb_db or sk not in emb_db:
+            missing.append(i)
+    return missing
 
 
-async def _fill_missing_embeddings(model: str, sid_texts: list[tuple[int, str, str]], emb_db: dict) -> dict:
-    caption_texts = [t for _, t, _ in sid_texts]
-    emotion_texts = [t.split(',')[0] for t in caption_texts]
-    keys = [f"{sid}:{text}" for sid, text, _ in sid_texts]
+async def _fill_missing_embeddings(model: str, sid_texts: list[tuple[int, str, str, str, str]], emb_db: dict) -> dict:
+    # emotion 与 scene 分开各算一个向量，检索时分别对比，避免语义互相污染；
+    # 某一侧缺失时用另一侧兜底，保证两次嵌入请求都有内容
+    emotion_texts = [(emotion or scene) for _, emotion, scene, _, _ in sid_texts]
+    scene_texts = [(scene or emotion) for _, emotion, scene, _, _ in sid_texts]
+    keys = [_sticker_emb_keys(sid, emotion, scene) for sid, emotion, scene, _, _ in sid_texts]
     missing_indices = _missing_indices(sid_texts, emb_db)
     if not missing_indices:
         return emb_db
@@ -355,13 +401,14 @@ async def _fill_missing_embeddings(model: str, sid_texts: list[tuple[int, str, s
     for batch_start in range(0, len(missing_indices), 10):
         batch_idx = missing_indices[batch_start:batch_start + 10]
         try:
-            batch_full_texts = [caption_texts[i] for i in batch_idx]
             batch_emotion_texts = [emotion_texts[i] for i in batch_idx]
-            full_embs = await rpc_query_embeddings(batch_full_texts, model)
-            emotion_embs_batch = await rpc_query_embeddings(batch_emotion_texts, model)
-            for i, full_e, emotion_e in zip(batch_idx, full_embs, emotion_embs_batch):
-                emb_db[keys[i]] = full_e
-                emb_db[f"e:{keys[i]}"] = emotion_e
+            batch_scene_texts = [scene_texts[i] for i in batch_idx]
+            emotion_embs = await rpc_query_embeddings(batch_emotion_texts, model)
+            scene_embs = await rpc_query_embeddings(batch_scene_texts, model)
+            for i, emotion_e, scene_e in zip(batch_idx, emotion_embs, scene_embs):
+                ek, sk = keys[i]
+                emb_db[ek] = emotion_e
+                emb_db[sk] = scene_e
             success_count += len(batch_idx)
         except Exception as e:
             warning(f"Sticker向量批次请求失败，跳过{len(batch_idx)}条，下次重试: {get_exc_desc(e)}")
@@ -370,12 +417,14 @@ async def _fill_missing_embeddings(model: str, sid_texts: list[tuple[int, str, s
     return emb_db
 
 
-def _commit_sticker_cache(model: str, sid_texts: list[tuple[int, str, str]], emb_db: dict, mtime: float):
-    keys = [f"{sid}:{text}" for sid, text, _ in sid_texts]
-    used_keys = set(keys) | {f"e:{k}" for k in keys}
+def _commit_sticker_cache(model: str, sid_texts: list[tuple[int, str, str, str, str]], emb_db: dict, mtime: float):
+    used_keys = _used_emb_keys(sid_texts)
+    stale_n = len(set(emb_db) - used_keys)
     new_emb_db = {k: v for k, v in emb_db.items() if k in used_keys}
     _apply_sticker_cache(sid_texts, new_emb_db, mtime)
     _save_emb_db(model, new_emb_db)
+    if stale_n:
+        info(f"清理{stale_n}个已删除表情包的残留向量")
     info(f"Sticker缓存完成，共{len(_sticker_cache)}条向量")
 
 
@@ -397,10 +446,13 @@ async def _sticker_job_fill(model: str):
     if not sid_texts:
         _apply_sticker_cache([], {}, mtime)
         return
-    if not _missing_indices(sid_texts, emb_db):
+    missing = _missing_indices(sid_texts, emb_db)
+    stale = _stale_emb_keys(sid_texts, emb_db)
+    if not missing and not stale:
         return
-    info("开始后台补全缺失表情包向量")
-    emb_db = await _fill_missing_embeddings(model, sid_texts, emb_db)
+    if missing:
+        info("开始后台补全缺失表情包向量")
+        emb_db = await _fill_missing_embeddings(model, sid_texts, emb_db)
     _commit_sticker_cache(model, sid_texts, emb_db, mtime)
 
 
@@ -418,17 +470,26 @@ def _spawn_sticker_job(coro, name: str):
     _sticker_job = asyncio.create_task(runner())
 
 
+def _sticker_db_mtime() -> float:
+    try:
+        return os.path.getmtime(STK_DB_PATH)
+    except OSError:
+        return 0.0
+
+
 def _load_memory_from_disk(model: str) -> bool:
-    """磁盘向量可用则装进内存。只在内存还空时读盘，之后以内存为准。"""
+    """磁盘向量可用则装进内存。sticker_db 变更（mtime）时重新加载，已删除的表情包不会残留。"""
     ok, emb_db = _emb_db_usable(model)
     if not ok:
         return False
-    if _sticker_cache:
+    if _sticker_cache and _sticker_cache_mtime == _sticker_db_mtime():
         return True
     try:
         sid_texts, mtime = _collect_sid_texts()
     except FileNotFoundError:
         return False
+    if _sticker_cache:
+        info("表情包库已变更，重新加载向量缓存")
     _apply_sticker_cache(sid_texts, emb_db, mtime)
     info(f"已从磁盘加载表情包向量，共{len(_sticker_cache)}条")
     return True
@@ -460,7 +521,8 @@ def schedule_sticker_fill():
         sid_texts, _ = _collect_sid_texts()
     except FileNotFoundError:
         return
-    if not _missing_indices(sid_texts, emb_db):
+    # 缺失向量或存在已删除表情包的残留向量，都需要后台任务处理
+    if not _missing_indices(sid_texts, emb_db) and not _stale_emb_keys(sid_texts, emb_db):
         return
     _spawn_sticker_job(_sticker_job_fill(model), "表情包向量补全")
 
@@ -641,43 +703,53 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
         return 0.0
     return float(np.dot(a, b) / (na * nb))
 
-async def search_sticker(group_id: int, query: dict) -> tuple[str, int] | tuple[None, None]:
+async def search_sticker(group_id: int, query: dict) -> tuple[str, int, str, list[int], dict] | tuple[None, None, None, None, None]:
     threshold = config.get('chat.sticker.similarity_threshold')
     model = config.get('chat.sticker.emb_model')
-    sticker_emotion = query.get('emotion', '')
-    sticker_scene = query.get('scene', '')
-    query = f"{sticker_emotion},{sticker_scene}" if sticker_emotion else sticker_scene
+    sticker_emotion = str(query.get('emotion') or '').strip()
+    sticker_scene = str(query.get('scene') or '').strip()
+    # 第一段用 emotion 对 emotion 筛情绪，第二段用 scene 对 scene 挑场景；
+    # 某一侧为空时用另一侧兜底，避免请求空文本
+    query_emotion_text = sticker_emotion or sticker_scene
+    query_scene_text = sticker_scene or sticker_emotion
     try:
         if not _sticker_cache:
-            return None, None, None, None
-        # query拆emotion和full，两次请求
-        query_embs = await rpc_query_embeddings([query, sticker_emotion], model)
-        query_full_emb = np.array(query_embs[0], dtype=np.float32)
-        query_emotion_emb = np.array(query_embs[1], dtype=np.float32)
+            return None, None, None, None, None
+        # 表情包文件可能已被主程序删除（sticker_db 更新有延迟），先剔除失效条目再检索
+        for stale_sid in {c[0] for c in _sticker_cache if not os.path.isfile(c[1])}:
+            _drop_sticker_cache_sid(stale_sid)
+        if not _sticker_cache:
+            info("表情包缓存已全部失效，取消发送")
+            return None, None, None, None, None
+        # 一次请求拿 emotion / scene 两个 query 向量
+        query_embs = await rpc_query_embeddings([query_emotion_text, query_scene_text], model)
+        query_emotion_emb = np.array(query_embs[0], dtype=np.float32)
+        query_scene_emb = np.array(query_embs[1], dtype=np.float32)
         # 第一阶段：emotion相似度过滤，低于threshold的排除
-        # 第二阶段：在通过的候选里用full相似度选最高
-        sid_best: dict[int, tuple[float, str]] = {}
-        for sid, text, path, full_emb, emotion_emb in _sticker_cache:
+        # 第二阶段：在通过的候选里用scene相似度选最高
+        sid_best: dict[int, tuple[float, str, str]] = {}
+        for sid, path, stk_info, emotion_emb, scene_emb in _sticker_cache:
             emotion_score = cosine_similarity(query_emotion_emb, emotion_emb)
             if emotion_score < threshold:
                 continue
-            full_score = cosine_similarity(query_full_emb, full_emb)
-            if sid not in sid_best or full_score > sid_best[sid][0]:
-                sid_best[sid] = (full_score, path)
+            scene_score = cosine_similarity(query_scene_emb, scene_emb)
+            if sid not in sid_best or scene_score > sid_best[sid][0]:
+                sid_best[sid] = (scene_score, path, stk_info)
         # 乘以倍率后选最高
         all_sids = list(sid_best.keys())
         old_multipliers = {sid: get_sticker_multiplier(group_id, sid) for sid in all_sids}
-        best_path, best_score, best_sid = None, -1.0, None
-        for sid, (raw_score, path) in sid_best.items():
+        best_path, best_info, best_score, best_sid = None, '', -1.0, None
+        for sid, (raw_score, path, stk_info) in sid_best.items():
             adjusted = raw_score * old_multipliers[sid]
             if adjusted > best_score:
                 best_score = adjusted
                 best_path = path
+                best_info = stk_info
                 best_sid = sid
         if best_score >= threshold:
             raw = sid_best[best_sid][0]
-            info(f"Sticker: sid={best_sid}, adjusted={raw:.3f}*{old_multipliers[best_sid]:.1f}={best_score:.3f}, query={query}")
-            return best_path, best_sid, all_sids, old_multipliers
+            info(f"Sticker: sid={best_sid}, adjusted={raw:.3f}*{old_multipliers[best_sid]:.1f}={best_score:.3f}, query=emotion:{sticker_emotion}|scene:{sticker_scene}")
+            return best_path, best_sid, best_info, all_sids, old_multipliers
         else:
             info(f"没有合适的表情包，取消发送")
             update_sticker_multipliers(group_id, None, all_sids)
@@ -685,10 +757,10 @@ async def search_sticker(group_id: int, query: dict) -> tuple[str, int] | tuple[
                        for s in all_sids if abs(get_sticker_multiplier(group_id, s) - old_multipliers[s]) > 0.001]
             if changed:
                 info(f"表情包倍率: {', '.join(changed)}")
-            return None, None, None, None
+            return None, None, None, None, None
     except BaseException as e:
         warning(f"Sticker搜索内部失败: {get_exc_desc(e)}")
-        return None, None, None, None
+        return None, None, None, None, None
 
 
 @dataclass
@@ -1170,7 +1242,7 @@ async def chat(msg: Message):
                 sm_text += "```\n"
                 for sm in sms:
                     if sm.sticker:
-                        body = f"[表情包: {sm.sticker}]"
+                        body = f"[表情包:{sm.sticker}]"
                     elif sm.tts:
                         body = f"[语音: {sm.tts}]"
                     else:
@@ -1358,21 +1430,34 @@ async def chat(msg: Message):
             await note_sent_msg(send_msg_id)
 
         async def process_sticker(hit: tuple, query: dict | None = None):
-            sticker_path, sticker_sid, sticker_all_sids, sticker_old_multipliers = hit
+            sticker_path, sticker_sid, sticker_info, sticker_all_sids, sticker_old_multipliers = hit
             if not sticker_path:
                 info("未匹配到表情包，跳过发送")
                 return
-            send_ret = await rpc_send_group_msg(msg.group_id, f"[CQ:image,file=file://{sticker_path}]")
-            send_msg_id = int(send_ret['message_id'])
+            # 检索后文件也可能被删除，发送前再确认一次；失效则剔除缓存并跳过
+            if not os.path.isfile(sticker_path):
+                _drop_sticker_cache_sid(sticker_sid, sticker_path)
+                info(f"表情包文件已不存在，跳过发送: sid={sticker_sid}")
+                return
+            try:
+                send_ret = await rpc_send_group_msg(msg.group_id, f"[CQ:image,file=file://{sticker_path}]")
+                send_msg_id = int(send_ret['message_id'])
+            except Exception as e:
+                # 发送失败（多为文件已被删除）: 不能拖垮本轮后续动作与记忆更新
+                warning(f"表情包发送失败: sid={sticker_sid} path={sticker_path}, err={get_exc_desc(e)}")
+                _drop_sticker_cache_sid(sticker_sid, sticker_path)
+                return
             await note_sent_msg(send_msg_id)
             info(f"表情包发送成功: sid={sticker_sid}")
             query = query or {}
             emotion = str(query.get('emotion') or '').strip()
             scene = str(query.get('scene') or '').strip()
             if emotion and scene:
-                sticker_desc = f"{emotion}/{scene}"
+                sticker_desc = f"{emotion} & {scene}"
             else:
                 sticker_desc = emotion or scene or f"sid={sticker_sid}"
+            if sticker_info:
+                sticker_desc += f" | {sticker_info}"
             send_msg_id_texts.append((send_msg_id, 'sticker', sticker_desc))
             update_sticker_multipliers(msg.group_id, sticker_sid, sticker_all_sids)
             changed = [f"sid={s}({sticker_old_multipliers[s]:.1f}→{get_sticker_multiplier(msg.group_id, s):.1f})"

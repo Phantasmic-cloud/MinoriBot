@@ -30,13 +30,10 @@ class Sticker:
     sid: int
     path: str
     caption: list
+    info: str = ""
     thumb_path: str | None = None
     hash1: str | None = None
     hash2: str | None = None
-
-    def caption_texts(self) -> list[str]:
-        """拼出 emotion,scene 文案列表。"""
-        return [f"{c['emotion']},{c['scene']}" for c in self.caption if c.get("emotion") and c.get("scene")]
 
     @classmethod
     def load(cls, data: dict) -> "Sticker":
@@ -47,6 +44,7 @@ class Sticker:
             sid=data["sid"],
             path=data["path"],
             caption=raw_caption,
+            info=data.get("info", ""),
             thumb_path=data.get("thumb_path", None),
             hash1=data.get("hash1", None),
             hash2=data.get("hash2", None),
@@ -155,7 +153,7 @@ class StickerManager:
             self._save()
         return None
 
-    def add(self, img_path: str, caption) -> int:
+    def add(self, img_path: str, caption, info: str = "") -> int:
         """拷贝图片入库，返回新 sid。"""
         self.sid_top += 1
         sid = self.sid_top
@@ -163,7 +161,7 @@ class StickerManager:
         os.makedirs(STICKER_DIR, exist_ok=True)
         dst = os.path.join(STICKER_DIR, f"{sid}{ext}")
         shutil.copy2(img_path, dst)
-        s = Sticker(sid=sid, path=dst, caption=caption)
+        s = Sticker(sid=sid, path=dst, caption=caption, info=info)
         s.calc_hash()
         self.stickers[sid] = s
         self._save()
@@ -189,7 +187,7 @@ class StickerManager:
 
 
 async def generate_caption(img_path: str):
-    """用 LLM 给表情包写 emotion/scene 理解。"""
+    """用 LLM 给表情包写 emotion/scene 理解与内容描述 info。"""
     model = config.get("caption.model")
     timeout = config.get("caption.timeout")
     max_tokens = config.get("caption.max_tokens")
@@ -209,11 +207,13 @@ async def generate_caption(img_path: str):
         assert start != -1 and end != -1
         data = loads_json(text[start:end + 1])
         captions = [c for c in data.get("captions", []) if c.get("emotion") and c.get("scene")]
-        assert captions
+        assert captions, "captions 为空"
+        info = str(data.get("info") or "").strip()
+        assert info, "info 为空"
     except Exception as e:
         raise Exception(f"解析表情包理解json失败: {e}\n原始: {text[:200]}")
     model_name_str = resp.model.get_full_name()
-    return captions, model_name_str, cost_seconds, resp.prompt_tokens, resp.completion_tokens
+    return captions, info, model_name_str, cost_seconds, resp.prompt_tokens, resp.completion_tokens
 
 
 # ======================= 指令处理 ======================= #
@@ -236,12 +236,15 @@ async def _(ctx: HandlerContext):
             dup_sid = await run_in_pool(StickerManager.get().check_duplicate, path)
             if dup_sid is not None:
                 raise ReplyException(f"与已有表情包重复(sid={dup_sid})，使用\"/sticker upload force\"强制上传")
-        captions, model_str, cost_s, ptokens, ctokens = await generate_caption(path)
-        sid = StickerManager.get().add(path, captions)
+        try:
+            captions, info, model_str, cost_s, ptokens, ctokens = await generate_caption(path)
+        except Exception as e:
+            raise ReplyException(f"上传失败: {e}")
+        sid = StickerManager.get().add(path, captions, info)
 
     lines = "\n".join([f"· {c['emotion']}，{c['scene']}" for c in captions])
     await ctx.asend_reply_msg(
-        f"上传成功 sid={sid}\n{lines}\n"
+        f"上传成功 sid={sid}\n{lines}\n详细: {info}\n"
         f"({model_str} | {cost_s:.1f}s, {ptokens}+{ctokens} tokens)"
     )
 
@@ -275,6 +278,8 @@ async def _(ctx: HandlerContext):
         raise ReplyException(f"表情包sid={sid}不存在")
     img_cq = await get_image_cq(s.path)
     lines = "\n".join([f"· {c['emotion']}，{c['scene']}" for c in s.caption]) if s.caption else "(无)"
+    if s.info:
+        lines += f"\n详细: {s.info}"
     await ctx.asend_reply_msg(f"{img_cq}\n{lines}")
 
 

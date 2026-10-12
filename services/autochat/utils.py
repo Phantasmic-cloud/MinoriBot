@@ -270,7 +270,9 @@ def get_readable_datetime(t: datetime | float | int, show_original_time=True, us
     if diff.total_seconds() < 60:
         text = f"{int(diff.total_seconds())}{second_unit}"
     elif diff.total_seconds() < 60 * 60:
-        text = f"{int(diff.total_seconds() / 60)}{minute_unit}"
+        minutes = int(diff.total_seconds() / 60)
+        seconds = int(diff.total_seconds() % 60)
+        text = f"{minutes}{minute_unit}{seconds}{second_unit}" if seconds else f"{minutes}{minute_unit}"
     elif diff.total_seconds() < 60 * 60 * 24:
         text = f"{int(diff.total_seconds() / 60 / 60)}{hour_unit}{int(diff.total_seconds() / 60 % 60)}{minute_unit}"
     else:
@@ -282,7 +284,7 @@ def get_readable_datetime(t: datetime | float | int, show_original_time=True, us
 
 def get_short_time(t: datetime | float | int) -> str:
     """
-    获取纯相对时间描述，如 "8秒前"、"3分钟前"、"2小时12分钟前"
+    获取纯相对时间描述，如 "8秒前"、"32分钟59秒前"、"2小时12分钟前"
     顶栏已给绝对时间，正文里只需相对时间，省 token
     """
     return get_readable_datetime(t, show_original_time=False)
