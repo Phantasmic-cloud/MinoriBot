@@ -1,7 +1,7 @@
-# 状态图配置。背景图放 data/status/bg/，随机抽一张，不走网络。
+# 状态图配置。背景图放 bg_dir 指定的目录（默认 data/status/bg/），随机抽一张，不走网络。
 # 布局按 650 宽画，scale=2 时输出 1300 宽。
-
 scale: 2                          # 输出倍率，2 即 1300 宽
+bg_dir: "data/status/bg"          # 背景图目录，目录不存在或为空则用纯色底
 show_current_bot_only: false      # 只画当前账号，false 则画全部在线 bot
 ob_v11_use_get_status: true       # 优先用 OneBot get_status 的收发计数
 disconnect_reset_counter: true    # 账号掉线后清掉本地收发计数

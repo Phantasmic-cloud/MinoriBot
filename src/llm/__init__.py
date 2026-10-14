@@ -7,6 +7,7 @@ from src.utils import *
 
 from .api_provider import ApiProvider, LlmModel
 from .api_provider_manager import api_provider_mgr
+from .token_stat import record_token_usage
 
 __all__ = [
     "ApiProvider",
@@ -16,6 +17,7 @@ __all__ = [
     "api_provider_mgr",
     "get_model_preset",
     "get_text_embedding",
+    "record_token_usage",
     "translate_text",
     "tts",
 ]
@@ -229,6 +231,7 @@ class ChatSession:
                 self.append_bot_content(result, imgs=[get_image_b64(img) for img in images], verbose=False)
                 cost = model.calc_price(prompt_tokens, completion_tokens)
                 quota = await provider.aupdate_quota(-cost)
+                await record_token_usage(provider.name, model.name, "chat", prompt_tokens, completion_tokens)
                 self.update_time = datetime.now()
                 ret = ChatSessionResponse(
                     result=result,
@@ -272,6 +275,7 @@ async def get_text_embedding(texts: List[str], model_name: str) -> List[List[flo
     tokens = response.usage.prompt_tokens
     cost = model["input_pricing"] * tokens
     await provider.aupdate_quota(-cost)
+    await record_token_usage(provider.name, model["id"], "embedding", tokens, 0)
     return embeddings
 
 
@@ -297,6 +301,7 @@ async def tts(text, save_path: str, model_name: str | None = None):
     pricing = float(model.get("input_pricing") or 0)
     if pricing:
         await provider.aupdate_quota(-pricing * len(text))
+    await record_token_usage(provider.name, model["id"], "tts", len(text), 0)
     logger.info("TTS成功, 保存到: %s", save_path)
     return save_path
 

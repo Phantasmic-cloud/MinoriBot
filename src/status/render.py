@@ -27,7 +27,6 @@ GRAY_LABEL = (190, 190, 190, 170)
 SEGMENT = (190, 190, 190, 255)
 SHADOW = (0, 0, 0, 40)
 
-BG_DIR = Path("data/status/bg")
 DEFAULT_AVATAR = Path("data/status/default_avatar.webp")
 config = Config("status")
 
@@ -134,9 +133,14 @@ class ProgressBar(Frame):
 
 
 def _pick_bg() -> Image.Image | None:
-    if not BG_DIR.exists():
+    """从配置的 bg_dir 里随机抽一张背景图；目录不存在/为空则返回 None。"""
+    try:
+        bg_dir = Path(str(config.get("bg_dir", "") or "data/status/bg"))
+    except Exception:
+        bg_dir = Path("data/status/bg")
+    if not bg_dir.exists():
         return None
-    files = [p for p in BG_DIR.iterdir() if p.is_file()]
+    files = [p for p in bg_dir.iterdir() if p.is_file()]
     if not files:
         return None
     try:
