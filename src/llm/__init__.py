@@ -1,4 +1,5 @@
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional, Tuple, Union
@@ -7,7 +8,11 @@ from src.utils import *
 
 from .api_provider import ApiProvider, LlmModel
 from .api_provider_manager import api_provider_mgr
-from .token_stat import record_token_usage
+from .sql import record_call
+
+# 导入即注册指令（/ts、/mas），须保留；用别名避免遮蔽同名子模块
+from .token_stat import token_stat as token_stat_cmd
+from .model_api_status import api_status as api_status_cmd
 
 __all__ = [
     "ApiProvider",
@@ -17,7 +22,7 @@ __all__ = [
     "api_provider_mgr",
     "get_model_preset",
     "get_text_embedding",
-    "record_token_usage",
+    "record_call",
     "translate_text",
     "tts",
 ]
@@ -162,10 +167,13 @@ class ChatSession:
             model_name = [model_name]
         errs: List[Tuple[str, str]] = []
         for idx, name in enumerate(model_name):
+            call_provider = call_model = None
+            t0 = None
             try:
                 model = api_provider_mgr.find_model(name)
                 name = model.get_full_name()
                 provider = model.provider
+                call_provider, call_model = provider.name, model.name
                 if not model.is_multimodal and self.has_image:
                     raise Exception(f"模型 {name} 不支持多模态输入")
                 logger.info("会话%s请求回复, 模型名: %s (%s/%s)", self.id, name, idx + 1, len(model_name))
@@ -175,6 +183,7 @@ class ChatSession:
                     extra_body["image_response"] = image_response
                     extra_body["modalities"] = ["image", "text"]
                 client = provider.get_client()
+                t0 = time.monotonic()
                 try:
                     response = await asyncio.wait_for(
                         client.chat.completions.create(
@@ -231,7 +240,9 @@ class ChatSession:
                 self.append_bot_content(result, imgs=[get_image_b64(img) for img in images], verbose=False)
                 cost = model.calc_price(prompt_tokens, completion_tokens)
                 quota = await provider.aupdate_quota(-cost)
-                await record_token_usage(provider.name, model.name, "chat", prompt_tokens, completion_tokens)
+                await record_call(provider.name, model.name, "chat", True,
+                                  (time.monotonic() - t0) * 1000 if t0 is not None else 0,
+                                  prompt_tokens, completion_tokens)
                 self.update_time = datetime.now()
                 ret = ChatSessionResponse(
                     result=result,
@@ -251,6 +262,9 @@ class ChatSession:
             except Exception as e:
                 logger.print_exc(f"会话{self.id}获取回复失败, 使用模型 {name}: {get_exc_desc(e)}")
                 errs.append((name, get_exc_desc(e)))
+                if call_provider is not None and t0 is not None:
+                    await record_call(call_provider, call_model, "chat", False,
+                                      (time.monotonic() - t0) * 1000, error=get_exc_desc(e))
                 await asyncio.sleep(get_cfg_or_value(model_switch_interval))
         if len(errs) == 1:
             raise ReplyException(f"调用模型{errs[0][0]}失败:\n{truncate(errs[0][1], 64)}")
@@ -266,16 +280,23 @@ async def get_text_embedding(texts: List[str], model_name: str) -> List[List[flo
     assert model is not None, f"文本嵌入模型 {model_name} 不存在"
     provider = api_provider_mgr.get_provider(model["provider"])
     assert provider is not None, f"文本嵌入模型 {model_name} 的供应方 {model['provider']} 不存在"
-    response = await provider.get_client().embeddings.create(
-        input=texts,
-        model=model["id"],
-        encoding_format="float",
-    )
+    t_emb = time.monotonic()
+    try:
+        response = await provider.get_client().embeddings.create(
+            input=texts,
+            model=model["id"],
+            encoding_format="float",
+        )
+    except Exception as e:
+        await record_call(provider.name, model["id"], "embedding", False,
+                          (time.monotonic() - t_emb) * 1000, error=get_exc_desc(e))
+        raise
     embeddings = [d.embedding for d in response.data]
     tokens = response.usage.prompt_tokens
     cost = model["input_pricing"] * tokens
     await provider.aupdate_quota(-cost)
-    await record_token_usage(provider.name, model["id"], "embedding", tokens, 0)
+    await record_call(provider.name, model["id"], "embedding", True,
+                      (time.monotonic() - t_emb) * 1000, prompt_tokens=tokens)
     return embeddings
 
 
@@ -292,16 +313,23 @@ async def tts(text, save_path: str, model_name: str | None = None):
     provider = api_provider_mgr.get_provider(model["provider"])
     assert provider is not None, f"TTS模型 {model['name']} 的供应方 {model['provider']} 不存在"
     provider.check_qps_limit()
-    response = await provider.get_client().audio.speech.create(
-        model=model["id"],
-        voice=model.get("voice") or "alloy",
-        input=text,
-    )
+    t_tts = time.monotonic()
+    try:
+        response = await provider.get_client().audio.speech.create(
+            model=model["id"],
+            voice=model.get("voice") or "alloy",
+            input=text,
+        )
+    except Exception as e:
+        await record_call(provider.name, model["id"], "tts", False,
+                          (time.monotonic() - t_tts) * 1000, error=get_exc_desc(e))
+        raise
     response.write_to_file(save_path)
     pricing = float(model.get("input_pricing") or 0)
     if pricing:
         await provider.aupdate_quota(-pricing * len(text))
-    await record_token_usage(provider.name, model["id"], "tts", len(text), 0)
+    await record_call(provider.name, model["id"], "tts", True,
+                      (time.monotonic() - t_tts) * 1000, prompt_tokens=len(text))
     logger.info("TTS成功, 保存到: %s", save_path)
     return save_path
 

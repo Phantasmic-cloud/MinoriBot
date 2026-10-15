@@ -133,11 +133,11 @@ class ProgressBar(Frame):
 
 
 def _pick_bg() -> Image.Image | None:
-    """从配置的 bg_dir 里随机抽一张背景图；目录不存在/为空则返回 None。"""
-    try:
-        bg_dir = Path(str(config.get("bg_dir", "") or "data/status/bg"))
-    except Exception:
-        bg_dir = Path("data/status/bg")
+    """从配置的 bg_dir 里随机抽一张背景图；未配置或目录为空则返回 None。"""
+    raw = config.get("bg_dir")
+    if not raw:
+        return None
+    bg_dir = Path(str(raw))
     if not bg_dir.exists():
         return None
     files = [p for p in bg_dir.iterdir() if p.is_file()]
