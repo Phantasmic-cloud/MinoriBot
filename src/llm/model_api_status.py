@@ -1,9 +1,11 @@
 # Model API 状态监控：统计各模型 API 调用成功率与响应时间，画时间线卡片
+import asyncio
 import math
+from datetime import datetime, timedelta
 
 from src.utils import *
 
-from .sql import _get_conn
+from .sql import _get_conn, register_on_record, get_recent_calls, set_cache_max, flush_pending
 from .draw import (
     CARD_W, CANVAS_W, MASK,
     _FONT, _small, _dim, _model_name,
@@ -34,6 +36,9 @@ _STATUS_STYLE = {
     _STATUS_BAD: ("⚠ 异常", (224, 86, 97, 210)),
 }
 _STATUS_ORDER = {_STATUS_BAD: 0, _STATUS_WARN: 1, _STATUS_OK: 2}
+
+# 推送状态（存 db，跨重启保留）
+_NOTIFY_BAD, _NOTIFY_OK = "bad", "ok"
 
 _AXIS_TEXT = (108, 114, 126, 255)
 _KIND_STYLE = {
@@ -126,6 +131,174 @@ async def query_api_status(start, end) -> dict:
     # 异常优先，其次按请求量降序
     items.sort(key=lambda it: (_STATUS_ORDER.get(it["status"], 3), -it["total"]))
     return {"items": items, "slow_ms": slow_ms, "ok_rate": ok_rate, "warn_rate": warn_rate}
+
+
+# ======================= 异常推送 ======================= #
+
+
+async def _fetch_recent_calls(provider: str, model: str, kind: str, limit: int) -> list[dict]:
+    """取某模型最近 limit 次调用，按时间正序返回（最早在前）。读内存缓存，不回查磁盘。"""
+    return await get_recent_calls(provider, model, kind, limit)
+
+
+def _judge_fail(calls: list[dict], rule: dict) -> str | None:
+    """判定是否异常，命中则返回原因描述。calls 按时间正序。
+
+    规则：连续 N 次失败，或最近 M 次里失败 ≥K 次。
+    """
+    streak = int(rule["fail_streak"])
+    window = int(rule["fail_window"])
+    threshold = int(rule["fail_count"])
+
+    # 连续失败
+    if streak > 0 and len(calls) >= streak:
+        tail = calls[-streak:]
+        if all(not c["ok"] for c in tail):
+            return f"连续 {streak} 次失败"
+
+    # 滑窗失败数
+    if window > 0 and len(calls) >= window:
+        tail = calls[-window:]
+        fails = sum(1 for c in tail if not c["ok"])
+        if fails >= threshold:
+            return f"最近 {window} 次失败 {fails} 次"
+    return None
+
+
+def _judge_recover(calls: list[dict], rule: dict) -> str | None:
+    """判定是否恢复，命中则返回原因描述。"""
+    streak = int(rule["recover_streak"])
+    window = int(rule["recover_window"])
+    threshold = int(rule["recover_count"])
+
+    if streak > 0 and len(calls) >= streak:
+        tail = calls[-streak:]
+        if all(c["ok"] for c in tail):
+            return f"连续 {streak} 次成功"
+
+    if window > 0 and len(calls) >= window:
+        tail = calls[-window:]
+        oks = sum(1 for c in tail if c["ok"])
+        if oks >= threshold:
+            return f"最近 {window} 次成功 {oks} 次"
+    return None
+
+
+def _notify_cfg() -> dict:
+    return {
+        "fail_streak": cfg_get("model_api_status.notify.fail_streak", int),
+        "fail_window": cfg_get("model_api_status.notify.fail_window", int),
+        "fail_count": cfg_get("model_api_status.notify.fail_count", int),
+        "recover_streak": cfg_get("model_api_status.notify.recover_streak", int),
+        "recover_window": cfg_get("model_api_status.notify.recover_window", int),
+        "recover_count": cfg_get("model_api_status.notify.recover_count", int),
+        "eval_limit": cfg_get("model_api_status.notify.eval_limit", int),
+        "chart_max_span": cfg_get("model_api_status.notify.chart_max_span", int),
+    }
+
+
+def _state_key(provider: str, model: str, kind: str) -> str:
+    # FileDB 按 "." 拆层级，模型名里常带 "."（如 glm-4.6v-flash）；
+    # 用 \. 转义让点号保持字面量，避免被误拆成嵌套结构
+    def esc(s) -> str:
+        return str(s).replace(".", r"\.")
+    return f"notify_states.{esc(provider)}.{esc(model)}.{esc(kind)}"
+
+
+# 按模型粒度的评估锁：防止并发调用触发重复推送
+_eval_locks: dict[str, asyncio.Lock] = {}
+
+
+def _eval_lock(key: str) -> asyncio.Lock:
+    lock = _eval_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _eval_locks[key] = lock
+    return lock
+
+
+async def _draw_single_model(provider: str, model: str, kind: str, start, end) -> bytes:
+    """按指定时间范围画单个模型的卡片，返回图片。"""
+    data = await query_api_status(start, end)
+    item = next(
+        (it for it in data["items"]
+         if it["provider"] == provider and it["model"] == model and it["kind"] == kind),
+        None,
+    )
+    if item is None:
+        return None
+    # 复用汇总卡绘制流程，但只画这一个模型
+    with Canvas(w=CANVAS_W, bg=_canvas_bg()).set_padding(0) as canvas:
+        with VSplit().set_w(CANVAS_W).set_padding(16).set_sep(14).set_item_align("c").set_bg(FillBg(MASK)):
+            _model_card(item, start, end)
+    img = await canvas.get_img(scale=2)
+    return _stamp_watermark(img, _WATERMARK)
+
+
+async def _evaluate_and_notify(provider: str, model: str, kind: str) -> None:
+    """事件驱动：一次调用落库后评估该模型，必要时推送异常/恢复。"""
+    groups = notify_gwl.get()
+    if not groups:
+        return
+
+    rule = _notify_cfg()
+    limit = max(
+        rule["eval_limit"],
+        rule["fail_streak"], rule["fail_window"],
+        rule["recover_streak"], rule["recover_window"],
+    )
+    key = _state_key(provider, model, kind)
+    label = f"{provider}:{model} [{kind}]"
+
+    async with _eval_lock(key):
+        calls = await _fetch_recent_calls(provider, model, kind, limit)
+        if not calls:
+            return
+
+        prev = str(file_db.get(key, "") or "")
+        if prev != _NOTIFY_BAD:
+            reason = _judge_fail(calls, rule)
+            if reason is None:
+                return
+            state, title = _NOTIFY_BAD, "⚠模型API异常通知"
+        else:
+            reason = _judge_recover(calls, rule)
+            if reason is None:
+                return
+            state, title = _NOTIFY_OK, "✓模型API恢复通知"
+        # 先落状态再推送：并发评估时后到的任务会直接跳过，避免重复刷屏
+        file_db.set(key, state)
+
+    # 慢操作放在锁外：画图 + 推送
+    # 画图从 sqlite 取数，触发评估的调用可能还压在待落盘队列里，先强制落一次
+    try:
+        await flush_pending()
+    except Exception as e:
+        logger.warning("推送前落盘失败: %s", get_exc_desc(e))
+
+    end = datetime.now()
+    first_ts = min(c["time"] for c in calls)
+    span_limit = end - timedelta(seconds=int(rule["chart_max_span"]))
+    start = max(datetime.fromtimestamp(first_ts), span_limit)
+
+    try:
+        img = await _draw_single_model(provider, model, kind, start, end)
+    except Exception as e:
+        logger.print_exc(f"生成 {label} 状态图失败: {get_exc_desc(e)}")
+        img = None
+
+    cq = await get_image_cq(img, low_quality=True) if img is not None else ""
+    headline = title
+    state_name = "异常" if state == _NOTIFY_BAD else "恢复"
+    logger.info("API状态推送 %s: %s (%s)", state_name, label, reason)
+
+    for group_id in groups:
+        try:
+            # get_image_cq 返回的是完整 CQ 码，直接与文本拼接即可
+            msg = f"{headline}\n{cq}" if cq else headline
+            await send_group_msg_by_bot(group_id, msg)
+        except Exception as e:
+            logger.print_exc(f"向群 {group_id} 推送 {label} 状态失败: {get_exc_desc(e)}")
 
 
 # ======================= 绘图 ======================= #
@@ -248,3 +421,15 @@ async def _(ctx: HandlerContext):
         return await ctx.asend_reply_msg(f"{_fmt_range(start, end)} 没有 API 调用记录")
     img = await draw_api_report(start, end, data)
     return await ctx.asend_reply_msg(await get_image_cq(img, low_quality=True))
+
+
+# ======================= 异常推送 ======================= #
+
+# 群白名单：/model_api_status_notify on|off|status
+notify_gwl = get_group_white_list(file_db, logger, "model_api_status_notify", is_service=False)
+
+# 内存缓存条数 = 评估窗口 * 3，足够应对并发写入
+set_cache_max(cfg_get("model_api_status.notify.eval_limit", int) * 3)
+
+# 注册事件钩子：每次调用入内存后评估该模型
+register_on_record(_evaluate_and_notify)

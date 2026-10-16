@@ -22,6 +22,7 @@
 - 🛠️ [开启或关闭自动聊天](#开启或关闭自动聊天)
 - [Token 用量统计](#token-用量统计)
 - [API 状态监控](#api-状态监控)
+- 🛠️ [模型API异常推送](#模型api异常推送)
 ---
 
 
@@ -155,6 +156,17 @@
 - `/mas 1h` `/mas 30m` `/mas 7d` 过去 N 小时/分钟/天
 - `/mas 2026-10-13` 指定日期
 - `/mas 2026-10-10~2026-10-13` 日期区间
+
+
+### 模型API异常推送
+🛠️ `/model api status notify on` `/model api status notify off` `/model api status notify status`
+> 开启或关闭本群的模型API异常推送  
+开启后，模型出现异常（连续失败或短窗内多次失败）时推送告警图，恢复正常时推送恢复通知  
+判定规则（可在配置中调整）：连续 3 次失败，或最近 10 次里失败 ≥4 次 → 异常；连续 5 次成功，或最近 9 次里成功 ≥8 次 → 恢复  
+异常持续期间不重复推送，跨状态才推
+
+- `/model api status notify on` 开启当前群聊的异常推送
+- `/model api status notify off` 关闭当前群聊的异常推送
 ---
 
 [回到帮助目录](./main.md)

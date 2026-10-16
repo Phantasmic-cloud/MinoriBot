@@ -33,7 +33,17 @@ token_stat:                   # /ts 统计卡片
   other_label: "其它模型"     # 合并项显示名（固定灰色）
 
 model_api_status:             # /mas 状态监控卡片
-  slow_ms: 60000              # 单次请求耗时超过此值算"慢"（时间线标黄），单位毫秒
+  slow_ms: 20000              # 单次请求耗时超过此值算"慢"（时间线标黄），单位毫秒
   ok_rate: 0.90               # 成功率 >= 此值 → 正常（绿）
   warn_rate: 0.80             # 成功率 >= 此值 → 警告（黄），低于则异常（红）
   max_show: 12                # 一次最多画多少个模型卡片
+  notify:                     # 异常推送（事件驱动，跨状态才推）
+    fail_streak: 3            # 连续失败 N 次 → 判异常
+    fail_window: 10           # 滑窗长度：最近 N 次
+    fail_count: 4             # 滑窗内失败 >= 此值 → 判异常
+    recover_streak: 5         # 连续成功 N 次 → 判恢复
+    recover_window: 9         # 滑窗长度：最近 N 次
+    recover_count: 8          # 滑窗内成功 >= 此值 → 判恢复
+    eval_limit: 10            # 每次评估取最近多少次调用（须 >= 上述各窗口）
+    chart_max_span: 86400     # 推送图画图跨度上限（秒），超过则只画最近这一段
+    flush_interval: 2         # 内存缓存批量落盘 sqlite 的间隔（秒）
